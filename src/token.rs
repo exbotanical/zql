@@ -1,0 +1,140 @@
+#[derive(PartialEq, Debug)]
+pub enum Token {
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    Comma,
+    Dot,
+    Minus,
+    Plus,
+    Semicolon,
+    Slash,
+    Star,
+
+    // One or two character tokens.
+    Bang,
+    BangEqual,
+    Equal,
+    EqualEqual,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+
+    // Literals.
+    Identifier(String),
+    String(String),
+    Number(f64), // TODO: non-float
+
+    // Keywords
+    Create,
+    Insert,
+    Table,
+    Where,
+    Select,
+    From,
+    Into,
+    Limit,
+    And,
+    Or,
+    Values,
+    Text,
+    Int,
+    Keyword(String),
+
+    // Meta
+    Erroneous(String),
+    Eof,
+}
+
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum TokenKind {
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    Comma,
+    Dot,
+    Minus,
+    Plus,
+    Semicolon,
+    Slash,
+    Star,
+
+    Bang,
+    BangEqual,
+    Equal,
+    EqualEqual,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+
+    Identifier,
+    String,
+    Number,
+
+    Create,
+    Insert,
+    Table,
+    Where,
+    Select,
+    From,
+    Into,
+    Limit,
+    And,
+    Or,
+    Values,
+    Text,
+    Int,
+    Keyword,
+
+    Erroneous,
+    Eof,
+}
+
+impl From<&Token> for TokenKind {
+    fn from(value: &Token) -> Self {
+        match value {
+            Token::LeftParen => TokenKind::LeftParen,
+            Token::RightParen => TokenKind::RightParen,
+            Token::LeftBrace => TokenKind::LeftBrace,
+            Token::RightBrace => TokenKind::RightBrace,
+            Token::Comma => TokenKind::Comma,
+            Token::Dot => TokenKind::Dot,
+            Token::Minus => TokenKind::Minus,
+            Token::Plus => TokenKind::Plus,
+            Token::Semicolon => TokenKind::Semicolon,
+            Token::Slash => TokenKind::Slash,
+            Token::Star => TokenKind::Star,
+            Token::Bang => TokenKind::Bang,
+            Token::BangEqual => TokenKind::BangEqual,
+            Token::Equal => TokenKind::Equal,
+            Token::EqualEqual => TokenKind::EqualEqual,
+            Token::Greater => TokenKind::Greater,
+            Token::GreaterEqual => TokenKind::GreaterEqual,
+            Token::Less => TokenKind::Less,
+            Token::LessEqual => TokenKind::LessEqual,
+            Token::Identifier(_) => TokenKind::Identifier,
+            Token::String(_) => TokenKind::String,
+            Token::Number(_) => TokenKind::Number,
+            Token::Create => TokenKind::Create,
+            Token::Insert => TokenKind::Insert,
+            Token::Table => TokenKind::Table,
+            Token::Where => TokenKind::Where,
+            Token::Select => TokenKind::Select,
+            Token::From => TokenKind::From,
+            Token::Into => TokenKind::Into,
+            Token::Limit => TokenKind::Limit,
+            Token::And => TokenKind::And,
+            Token::Or => TokenKind::Or,
+            Token::Values => TokenKind::Values,
+            Token::Text => TokenKind::Text,
+            Token::Int => TokenKind::Int,
+            Token::Keyword(_) => TokenKind::Keyword,
+            Token::Erroneous(_) => TokenKind::Erroneous,
+            Token::Eof => TokenKind::Eof,
+        }
+    }
+}
