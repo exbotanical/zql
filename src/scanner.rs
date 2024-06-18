@@ -1,26 +1,17 @@
 use std::{iter::Peekable, str::Chars};
 
+use crate::pos::BytePos;
+
 const NULL_CHAR: char = '\u{0000}';
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BytePos(pub u32);
-
-impl BytePos {
-    fn shift(self, ch: char) -> Self {
-        BytePos(self.0 + ch.len_utf8() as u32)
-    }
-}
-
 pub struct Scanner<'a> {
-    line: i64,
-    pos: BytePos,
+    pub pos: BytePos,
     buf: Peekable<Chars<'a>>,
 }
 
 impl<'a> Scanner<'a> {
     pub fn new(buf: &str) -> Scanner {
         Scanner {
-            line: 1,
             pos: BytePos::default(),
             buf: buf.chars().peekable(),
         }
@@ -43,8 +34,8 @@ impl<'a> Scanner<'a> {
     where
         F: Fn(char) -> bool,
     {
-        if let Some(ch) = self.peek() {
-            if f(ch) {
+        if let Some(c) = self.peek() {
+            if f(c) {
                 self.next().unwrap();
                 true
             } else {
@@ -60,10 +51,10 @@ impl<'a> Scanner<'a> {
         F: Fn(char) -> bool,
     {
         let mut chars: Vec<char> = Vec::new();
-        while let Some(ch) = self.peek() {
-            if f(ch) {
+        while let Some(c) = self.peek() {
+            if f(c) {
                 self.next();
-                chars.push(ch)
+                chars.push(c)
             } else {
                 break;
             }
@@ -85,7 +76,7 @@ mod tests {
     use super::Scanner;
 
     #[test]
-    fn test_scanner_basic_happy_case() {
+    fn test_scanner_basic() {
         let text = "text";
         let mut scanner = Scanner::new(text);
 
@@ -97,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scanner_nonascii_happy_case() {
+    fn test_scanner_nonascii() {
         let text = "🗿x🗿x🗿🗿";
         let mut scanner = Scanner::new(text);
 

@@ -1,3 +1,5 @@
+use crate::token::Operator;
+
 pub enum Statement<'a> {
     Select(SelectStatement<'a>),
     Insert(InsertStatement<'a>),
@@ -12,19 +14,25 @@ struct SelectOpt<'a> {
 struct SelectStatement<'a> {
     source: &'a str,
     columns: Vec<&'a str>,
-    exprs: Vec<Expression<'a>>,
+    exprs: Vec<Expression>,
     opts: Vec<SelectOpt<'a>>,
 }
 
-struct Expression<'a> {
-    left: Literal<'a>,
-    // TODO: strongly-typed/enum
-    operator: &'a str,
-    right: Literal<'a>,
+#[derive(Debug)]
+pub struct Expression {
+    // TODO: allow both sides to be literal or identifier
+    pub left: String,
+    pub operator: Operator,
+    pub right: Literal,
 }
 
-struct Literal<'a> {
-    value: &'a str,
+#[derive(Debug, PartialEq)]
+pub enum Literal {
+    Boolean(bool),
+    String(String),
+    Float(f64),
+    UnsignedInt(u64),
+    Nil,
 }
 
 struct ColumnConfig<'a> {

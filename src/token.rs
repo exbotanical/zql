@@ -1,4 +1,6 @@
-#[derive(PartialEq, Debug)]
+use std::fmt::Display;
+
+#[derive(PartialEq, Debug, Clone)]
 pub enum Token {
     LeftParen,
     RightParen,
@@ -12,7 +14,6 @@ pub enum Token {
     Slash,
     Star,
 
-    // One or two character tokens.
     Bang,
     BangEqual,
     Equal,
@@ -22,12 +23,12 @@ pub enum Token {
     Less,
     LessEqual,
 
-    // Literals.
     Identifier(String),
     String(String),
-    Number(f64), // TODO: non-float
+    // TODO: signed ints
+    UnsignedInt(u64),
+    Float(f64),
 
-    // Keywords
     Create,
     Insert,
     Table,
@@ -39,11 +40,13 @@ pub enum Token {
     And,
     Or,
     Values,
+    // TODO: Rename these (Text, Int) - they're type specifiers; not values
     Text,
     Int,
-    Keyword(String),
+    True,
+    False,
+    Nil,
 
-    // Meta
     Erroneous(String),
     Eof,
 }
@@ -73,7 +76,8 @@ pub enum TokenKind {
 
     Identifier,
     String,
-    Number,
+    UnsignedInt,
+    Float,
 
     Create,
     Insert,
@@ -88,6 +92,9 @@ pub enum TokenKind {
     Values,
     Text,
     Int,
+    True,
+    False,
+    Nil,
     Keyword,
 
     Erroneous,
@@ -118,7 +125,8 @@ impl From<&Token> for TokenKind {
             Token::LessEqual => TokenKind::LessEqual,
             Token::Identifier(_) => TokenKind::Identifier,
             Token::String(_) => TokenKind::String,
-            Token::Number(_) => TokenKind::Number,
+            Token::UnsignedInt(_) => TokenKind::UnsignedInt,
+            Token::Float(_) => TokenKind::Float,
             Token::Create => TokenKind::Create,
             Token::Insert => TokenKind::Insert,
             Token::Table => TokenKind::Table,
@@ -132,9 +140,46 @@ impl From<&Token> for TokenKind {
             Token::Values => TokenKind::Values,
             Token::Text => TokenKind::Text,
             Token::Int => TokenKind::Int,
-            Token::Keyword(_) => TokenKind::Keyword,
+            Token::False => TokenKind::False,
+            Token::True => TokenKind::True,
+            Token::Nil => TokenKind::Nil,
             Token::Erroneous(_) => TokenKind::Erroneous,
             Token::Eof => TokenKind::Eof,
+        }
+    }
+}
+
+impl From<&crate::pos::WithPosRange<Token>> for TokenKind {
+    fn from(t: &crate::pos::WithPosRange<Token>) -> Self {
+        TokenKind::from(&t.value)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Operator {
+    BangEqual,
+    EqualEqual,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+}
+
+impl TryInto<Operator> for Token {
+    type Error = String;
+
+    fn try_into(self) -> Result<Operator, Self::Error> {
+        match self {
+            Token::BangEqual => Ok(Operator::BangEqual),
+            Token::EqualEqual => Ok(Operator::EqualEqual),
+            Token::Greater => Ok(Operator::Greater),
+            Token::GreaterEqual => Ok(Operator::GreaterEqual),
+            Token::Less => Ok(Operator::Less),
+            Token::LessEqual => Ok(Operator::LessEqual),
+            _ => Err(format!(
+                "{} is not a valid operator",
+                "value TODO: impl display"
+            )),
         }
     }
 }
