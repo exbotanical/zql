@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 #[derive(PartialEq, Debug, Clone)]
 pub enum Token {
     LeftParen,
@@ -95,7 +93,6 @@ pub enum TokenKind {
     True,
     False,
     Nil,
-    Keyword,
 
     Erroneous,
     Eof,
@@ -149,8 +146,8 @@ impl From<&Token> for TokenKind {
     }
 }
 
-impl From<&crate::pos::WithPosRange<Token>> for TokenKind {
-    fn from(t: &crate::pos::WithPosRange<Token>) -> Self {
+impl From<&crate::pos::WithPosMetadata<Token>> for TokenKind {
+    fn from(t: &crate::pos::WithPosMetadata<Token>) -> Self {
         TokenKind::from(&t.value)
     }
 }
@@ -176,10 +173,7 @@ impl TryInto<Operator> for Token {
             Token::GreaterEqual => Ok(Operator::GreaterEqual),
             Token::Less => Ok(Operator::Less),
             Token::LessEqual => Ok(Operator::LessEqual),
-            _ => Err(format!(
-                "{} is not a valid operator",
-                "value TODO: impl display"
-            )),
+            _ => Err("Expected a valid operator".to_string()),
         }
     }
 }

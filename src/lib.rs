@@ -1,5 +1,5 @@
 mod lexer;
-mod parser;
+pub mod parser;
 mod pos;
 mod scanner;
 mod stmt;

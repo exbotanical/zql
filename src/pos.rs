@@ -7,41 +7,52 @@ impl BytePos {
     }
 }
 
-pub struct PosRange {
+#[derive(Debug)]
+pub struct PosMetadata {
     pub start_inclusive: BytePos,
     pub end_inclusive: BytePos,
+    pub line: usize,
+    // TODO: col
 }
 
-impl PosRange {
-    pub const fn empty() -> PosRange {
+impl PosMetadata {
+    pub const fn empty() -> PosMetadata {
         let zero = BytePos(0);
-        PosRange {
+        PosMetadata {
             start_inclusive: zero,
             end_inclusive: zero,
+            line: 0,
         }
     }
 }
 
-pub struct WithPosRange<T> {
+#[derive(Debug)]
+pub struct WithPosMetadata<T> {
     pub value: T,
-    pub pos: PosRange,
+    pub pos: PosMetadata,
 }
 
-impl<T> WithPosRange<T> {
-    pub fn new(value: T, start_inclusive: BytePos, end_inclusive: BytePos) -> WithPosRange<T> {
-        WithPosRange {
+impl<T> WithPosMetadata<T> {
+    pub fn new(
+        value: T,
+        start_inclusive: BytePos,
+        end_inclusive: BytePos,
+        line: usize, // TODO: when to use usize vs u64?
+    ) -> WithPosMetadata<T> {
+        WithPosMetadata {
             value,
-            pos: PosRange {
+            pos: PosMetadata {
                 start_inclusive,
                 end_inclusive,
+                line,
             },
         }
     }
 
-    pub const fn empty(value: T) -> WithPosRange<T> {
-        WithPosRange {
+    pub const fn empty(value: T) -> WithPosMetadata<T> {
+        WithPosMetadata {
             value,
-            pos: PosRange::empty(),
+            pos: PosMetadata::empty(),
         }
     }
 }

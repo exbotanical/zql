@@ -1,48 +1,60 @@
+use std::fmt::format;
+
 use crate::{
-    pos::WithPosRange,
-    stmt::{Expression, Literal, Statement},
+    pos::WithPosMetadata,
+    stmt::{
+        ColumnConfig, ColumnType, CreateTableStatement, Expression, InsertStatement, Literal,
+        SelectOpt, SelectStatement, Statement,
+    },
     token::{Operator, Token, TokenKind},
 };
 
-static EOF_TOKEN: WithPosRange<Token> = WithPosRange::empty(Token::Eof);
+static EOF_TOKEN: WithPosMetadata<Token> = WithPosMetadata::empty(Token::Eof);
 
-pub struct Parser<'a> {
-    tokens: &'a [WithPosRange<Token>],
+static STATEMENT_KEYWORDS: [TokenKind; 3] =
+    [TokenKind::Insert, TokenKind::Select, TokenKind::Create];
+static COLUMN_TYPES: [TokenKind; 2] = [TokenKind::Int, TokenKind::Text];
+static EXPR_CONJUNCTIONS: [TokenKind; 2] = [TokenKind::And, TokenKind::Or];
+
+pub struct Parser {
+    tokens: Vec<WithPosMetadata<Token>>,
     cursor: usize,
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [WithPosRange<Token>]) -> Parser {
+impl Parser {
+    pub fn new(tokens: Vec<WithPosMetadata<Token>>) -> Parser {
         Parser { tokens, cursor: 0 }
     }
 
-    fn parse(&mut self) -> Result<(), ()> {
-        // if self.tokens[self.tokens.len() - 2] != Token::Semicolon {
-        //     return Err(());
-        // }
+    pub fn parse(&mut self) -> Result<Vec<Statement>, String> {
+        let mut statements: Vec<Statement> = Vec::new();
 
-        let statements: Vec<Statement> = Vec::new();
-
-        // TODO: hoise
-        let stmt_kws = [TokenKind::Insert, TokenKind::Select, TokenKind::Create];
-        loop {
-            if self.matches_any(&stmt_kws) {}
+        while self.matches_any(&STATEMENT_KEYWORDS) {
+            statements.push(self.parse_stmt()?);
         }
 
-        Ok(())
+        let next = self.next();
+        match next.value {
+            Token::Eof => Ok(statements),
+            _ => Err(format!(
+                "Expected a new statement to begin after `;` at Ln {}",
+                next.pos.line,
+            )),
+        }
     }
 
-    fn peek(&self) -> &'a WithPosRange<Token> {
+    fn peek(&self) -> &WithPosMetadata<Token> {
         match self.tokens.get(self.cursor) {
             Some(t) => t,
             None => &EOF_TOKEN,
         }
     }
 
-    fn next(&mut self) -> &'a WithPosRange<Token> {
+    fn next(&mut self) -> &WithPosMetadata<Token> {
         match self.tokens.get(self.cursor) {
             Some(t) => {
                 self.cursor = self.cursor + 1;
+
                 t
             }
             None => &EOF_TOKEN,
@@ -51,14 +63,6 @@ impl<'a> Parser<'a> {
 
     fn check(&self, t: TokenKind) -> bool {
         TokenKind::from(self.peek()) == t
-    }
-
-    fn consume(&mut self, t: TokenKind, msg: &str) -> Result<&WithPosRange<Token>, String> {
-        if self.check(t) {
-            Ok(self.next())
-        } else {
-            Err("TODO:".to_string())
-        }
     }
 
     fn matches_any(&mut self, ts: &[TokenKind]) -> bool {
@@ -71,14 +75,26 @@ impl<'a> Parser<'a> {
         false
     }
 
-    fn parse_stmt(&mut self) -> Result<Statement, String> {
-        let token = self.next();
+    fn consume(&mut self, t: TokenKind, msg: &str) -> Result<&WithPosMetadata<Token>, String> {
+        if self.check(t) {
+            Ok(self.next())
+        } else {
+            Err(msg.to_string())
+        }
+    }
 
-        match token.value {
+    fn parse_stmt(&mut self) -> Result<Statement, String> {
+        // TODO: lower the first kw down into stmt?
+        let result = match &self.next().value {
             Token::Select => self.parse_select(),
             Token::Insert => self.parse_insert(),
             Token::Create => self.parse_create_table(),
-            _ => Err("TODO:".to_string()),
+            _ => return Err("Expected a valid statement".to_string()),
+        };
+
+        match &self.next().value {
+            Token::Semicolon => result,
+            _ => Err("Expected statement to be terminated by ';'".to_string()),
         }
     }
 
@@ -91,64 +107,179 @@ impl<'a> Parser<'a> {
                 Err(e) => return Err(e),
             }
         } else {
-            columns.append(&mut self.parse_list());
+            let mut cols = self.parse_columns()?;
+            if cols.len() == 0 {
+                return Err("Expected at least 1 column in SELECT statement".to_string());
+            }
+
+            columns.append(&mut cols);
         }
 
-        self.consume(TokenKind::From, "expect FROM").expect("TODO:");
+        self.consume(TokenKind::From, "Expected 'FROM' keyword after columns")?;
 
-        let source = match self.consume(TokenKind::Identifier, "expect ident") {
-            Ok(v) => v,
-            Err(e) => panic!("TODO:"),
+        let source = match &self.next().value {
+            Token::Identifier(v) => v,
+            _ => return Err("Expected a source table name".to_string()),
+        }
+        .to_owned();
+
+        if !self.check(TokenKind::Where) {
+            return Ok(Statement::Select(SelectStatement {
+                source,
+                columns,
+                exprs: Vec::new(),
+                opt: SelectOpt::None,
+            }));
+        }
+
+        self.consume(TokenKind::Where, "expect WHERE")?;
+
+        let exprs = self.parse_exprs()?;
+
+        let opt = if self.check(TokenKind::Limit) {
+            self.parse_opt()?
+        } else {
+            SelectOpt::None
         };
 
-        self.consume(TokenKind::Where, "expect WHERE")
-            .expect("TODO:");
-
-        Err("TODO:".to_string())
+        Ok(Statement::Select(SelectStatement {
+            source,
+            columns,
+            exprs,
+            opt,
+        }))
     }
 
     fn parse_insert(&mut self) -> Result<Statement, String> {
-        Err("TODO:".to_string())
+        self.consume(TokenKind::Into, "Expected 'INTO' keyword")?;
+
+        let dest = match &self.next().value {
+            Token::Identifier(v) => v.to_owned(),
+            _ => return Err("Expected a destination table name".to_string()),
+        };
+
+        self.consume(TokenKind::LeftParen, "Expected '(' before columns")?;
+        let columns = self.parse_columns()?;
+        self.consume(TokenKind::RightParen, "Expected ')' after columns")?;
+        if columns.len() == 0 {
+            return Err("Expected at least one column".to_string());
+        }
+
+        self.consume(TokenKind::Values, "Expected 'VALUES' keyword")?;
+        self.consume(TokenKind::LeftParen, "Expected '(' before values")?;
+        let values = self.parse_literals()?;
+        self.consume(TokenKind::RightParen, "Expected ')' after values")?;
+
+        if columns.len() != values.len() {
+            return Err(format!(
+                "Mismatched columns and values; expected {} values but got {}",
+                columns.len(),
+                values.len()
+            )
+            .to_string());
+        }
+
+        Ok(Statement::Insert(InsertStatement {
+            dest,
+            columns,
+            values,
+        }))
     }
 
     fn parse_create_table(&mut self) -> Result<Statement, String> {
-        Err("TODO:".to_string())
+        self.consume(TokenKind::Table, "Expected 'TABLE' keyword")?;
+
+        let name = match &self.next().value {
+            Token::Identifier(v) => v.to_owned(),
+            _ => return Err("Expected a valid table name".to_string()),
+        };
+
+        self.consume(TokenKind::LeftParen, "Expected '(' before columns")?;
+
+        let mut columns: Vec<ColumnConfig> = Vec::new();
+
+        // TODO: Generalize
+        loop {
+            match &self.peek().value {
+                Token::Identifier(_) => {
+                    columns.push(self.parse_column_config()?);
+                }
+                _ => return Err("Expected a valid column name".to_string()),
+            }
+
+            if !self.check(TokenKind::Comma) {
+                break;
+            } else {
+                self.next();
+            }
+        }
+
+        self.consume(TokenKind::RightParen, "Expected ')' after columns")?;
+
+        Ok(Statement::CreateTable(CreateTableStatement {
+            name,
+            columns,
+        }))
     }
 
-    fn parse_list(&mut self) -> Vec<String> {
+    fn parse_columns(&mut self) -> Result<Vec<String>, String> {
         let mut columns: Vec<String> = Vec::new();
 
-        while self.check(TokenKind::Identifier) {
+        loop {
             match &self.next().value {
                 Token::Identifier(v) => {
                     columns.push(v.to_owned());
                 }
-                _ => panic!("TODO:"),
+                _ => return Err("Expected a valid column name".to_string()),
             }
 
-            if self.check(TokenKind::Comma) {
-                self.consume(TokenKind::Comma, "expect comma")
-                    .expect("TODO:");
-            } else {
+            if !self.check(TokenKind::Comma) {
                 break;
+            } else {
+                self.next();
             }
         }
 
-        columns
+        Ok(columns)
+    }
+
+    fn parse_column_config(&mut self) -> Result<ColumnConfig, String> {
+        let name = match &self.next().value {
+            Token::Identifier(v) => v.to_owned(),
+            _ => return Err("Expected a valid column name".to_string()),
+        };
+
+        let t = match &self.next().value {
+            // TODO: try_from?
+            Token::Int => ColumnType::Int,
+            Token::Text => ColumnType::Text,
+            // TODO: get token value somehow?
+            _ => return Err("Expected a valid column type".to_string()),
+        };
+
+        Ok(ColumnConfig { name, t })
+    }
+
+    fn parse_opt(&mut self) -> Result<SelectOpt, String> {
+        match &self.next().value {
+            Token::Limit => match &self.next().value {
+                Token::UnsignedInt(v) => Ok(SelectOpt::Limit(*v)),
+                _ => Err("Expected an unsigned integer".to_string()),
+            },
+            _ => Err("Expected a valid opt type".to_string()),
+        }
     }
 
     fn parse_exprs(&mut self) -> Result<Vec<Expression>, String> {
+        // TODO: handle actual conjunctions (AND | OR)
         let mut exprs: Vec<Expression> = Vec::new();
-
-        // TODO: hoist
-        let until_kws = [TokenKind::And, TokenKind::Or];
 
         loop {
             let expr = self.parse_expr()?;
             exprs.push(expr);
 
             // TODO: cleanup
-            if !self.matches_any(&until_kws) {
+            if !self.matches_any(&EXPR_CONJUNCTIONS) {
                 break;
             } else {
                 self.next();
@@ -161,7 +292,7 @@ impl<'a> Parser<'a> {
     fn parse_expr(&mut self) -> Result<Expression, String> {
         let left = match &self.next().value {
             Token::Identifier(v) => v.to_owned(),
-            _ => return Err("TODO:".to_string()),
+            _ => return Err("Expected a valid column name as lvalue".to_string()),
         };
         let operator: Operator = self.next().value.clone().try_into()?;
         let right = self.parse_literal()?;
@@ -173,116 +304,783 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_literals(&mut self) -> Result<Vec<Literal>, String> {
+        let mut literals: Vec<Literal> = Vec::new();
+
+        loop {
+            literals.push(self.parse_literal()?);
+
+            if !self.check(TokenKind::Comma) {
+                break;
+            } else {
+                self.next();
+            }
+        }
+
+        Ok(literals)
+    }
+
     fn parse_literal(&mut self) -> Result<Literal, String> {
         match &self.next().value {
+            // TODO: try_into?
             Token::False => Ok(Literal::Boolean(false)),
             Token::True => Ok(Literal::Boolean(true)),
             Token::Nil => Ok(Literal::Nil),
             Token::UnsignedInt(v) => Ok(Literal::UnsignedInt(*v)),
             Token::Float(v) => Ok(Literal::Float(*v)),
             Token::String(v) => Ok(Literal::String(v.to_owned())),
-            _ => Err("TODO:".to_string()),
+            _ => Err("Expected a valid literal".to_string()),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    use lazy_static::lazy_static;
+
     use crate::{
         lexer::Lexer,
-        stmt::{Expression, Literal},
-        token::Operator,
+        stmt::{
+            ColumnConfig, ColumnType, CreateTableStatement, Expression, InsertStatement, Literal,
+            SelectOpt, SelectStatement, Statement,
+        },
+        token::{Operator, Token, TokenKind},
     };
 
     use super::Parser;
 
-    // TODO:
-    // fn get_p(text: &str) -> Parser<'static> {
-    //     let mut l = Lexer::new(text);
-    //     let tokens = l.tokenize();
-    //     let mut p = Parser::new(&tokens);
+    lazy_static! {
+        #[derive(Debug)]
+        static ref SELECT_STMT: Statement = Statement::Select(SelectStatement {
+            source: "blog_post".to_string(),
+            columns: vec!["uuid", "title", "subtitle", "img_src", "slug", "tags", "body",]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            exprs: vec![Expression {
+                left: "slug".to_string(),
+                operator: Operator::EqualEqual,
+                right: Literal::String("hello".to_string()),
+            }],
+            opt: SelectOpt::Limit(1),
+        });
 
-    //     p
-    // }
+        static ref INSERT_STMT: Statement = Statement::Insert(InsertStatement {
+                columns: vec!["title", "subtitle", "img_src", "slug", "tags", "body"]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                dest: "blog_post".to_string(),
+                values: vec![
+                    Literal::String("a".to_string()),
+                    Literal::String("b".to_string()),
+                    Literal::Nil,
+                    Literal::UnsignedInt(1),
+                    Literal::Float(2.0),
+                    Literal::Boolean(true)
+                ]
+            });
 
-    fn parse_literal(text: &str) -> Result<Literal, String> {
-        let mut l = Lexer::new(text);
-        let tokens = l.tokenize();
-        let mut p = Parser::new(&tokens);
-
-        p.parse_literal()
+            static ref CREATE_TABLE_STMT: Statement = Statement::CreateTable(CreateTableStatement {
+                name: "blog_post_comment".to_string(),
+                columns: vec![
+                    ColumnConfig {
+                        name: "uuid".to_string(),
+                        t: ColumnType::Text
+                    },
+                    ColumnConfig {
+                        name: "created_at".to_string(),
+                        t: ColumnType::Int
+                    },
+                    ColumnConfig {
+                        name: "comment".to_string(),
+                        t: ColumnType::Text
+                    },
+                    ColumnConfig {
+                        name: "email".to_string(),
+                        t: ColumnType::Text
+                    }
+                ]
+            });
     }
 
-    fn parse_list(text: &str) -> Vec<String> {
+    fn get_parser(text: &str) -> Parser {
         let mut l = Lexer::new(text);
         let tokens = l.tokenize();
-        let mut p = Parser::new(&tokens);
 
-        p.parse_list()
-    }
-
-    fn parse_expr(text: &str) -> Result<Expression, String> {
-        let mut l = Lexer::new(text);
-        let tokens = l.tokenize();
-        let mut p = Parser::new(&tokens);
-
-        p.parse_expr()
-    }
-
-    fn parse_exprs(text: &str) -> Result<Vec<Expression>, String> {
-        let mut l = Lexer::new(text);
-        let tokens = l.tokenize();
-        let mut p = Parser::new(&tokens);
-
-        p.parse_exprs()
+        Parser::new(tokens)
     }
 
     #[test]
-    fn test_parse_literal_ok() {
+    fn test_peek() {
+        let mut p = get_parser("SELECT hello FROM world;");
+
+        assert_eq!(p.peek().value, Token::Select);
+        p.next();
+        assert_eq!(p.peek().value, Token::Identifier("hello".to_string()));
+        p.next();
+        assert_eq!(p.peek().value, Token::From);
+        p.next();
+        assert_eq!(p.peek().value, Token::Identifier("world".to_string()));
+        p.next();
+        assert_eq!(p.peek().value, Token::Semicolon);
+        p.next();
+        assert_eq!(p.peek().value, Token::Eof);
+        assert_eq!(p.peek().value, Token::Eof);
+        p.next();
+        assert_eq!(p.peek().value, Token::Eof);
+    }
+
+    #[test]
+    fn test_peek_no_tokens() {
+        let mut p = get_parser("");
+
+        assert_eq!(p.peek().value, Token::Eof);
+        assert_eq!(p.peek().value, Token::Eof);
+        p.next();
+        assert_eq!(p.peek().value, Token::Eof);
+    }
+
+    #[test]
+    fn test_next() {
+        let mut p = get_parser("SELECT hello FROM world;");
+
+        assert_eq!(p.next().value, Token::Select);
+        assert_eq!(p.next().value, Token::Identifier("hello".to_string()));
+        assert_eq!(p.next().value, Token::From);
+        assert_eq!(p.next().value, Token::Identifier("world".to_string()));
+        assert_eq!(p.next().value, Token::Semicolon);
+        assert_eq!(p.next().value, Token::Eof);
+        assert_eq!(p.next().value, Token::Eof);
+        assert_eq!(p.next().value, Token::Eof);
+    }
+
+    #[test]
+    fn test_next_no_tokens() {
+        let mut p = get_parser("");
+
+        assert_eq!(p.next().value, Token::Eof);
+        assert_eq!(p.next().value, Token::Eof);
+        assert_eq!(p.next().value, Token::Eof);
+    }
+
+    #[test]
+    fn test_check() {
+        let mut p = get_parser("SELECT hello FROM world;");
+
+        assert_eq!(p.check(TokenKind::Select), true);
+        assert_eq!(p.check(TokenKind::Identifier), false);
+        p.next();
+        assert_eq!(p.check(TokenKind::Identifier), true);
+        p.next();
+        assert_eq!(p.check(TokenKind::From), true);
+        p.next();
+        assert_eq!(p.check(TokenKind::Identifier), true);
+        p.next();
+        assert_eq!(p.check(TokenKind::Semicolon), true);
+        p.next();
+        assert_eq!(p.check(TokenKind::Eof), true);
+        assert_eq!(p.check(TokenKind::Eof), true);
+        p.next();
+        assert_eq!(p.check(TokenKind::Eof), true);
+    }
+
+    #[test]
+    fn test_matches_any() {
+        let mut p = get_parser("SELECT hello FROM world;");
+
         assert_eq!(
-            parse_literal("\"text\"").expect("expected valid literal"),
-            Literal::String("text".to_string())
+            p.matches_any(&[TokenKind::Select, TokenKind::Identifier]),
+            true
+        );
+        assert_eq!(p.matches_any(&[TokenKind::Identifier]), false);
+        p.next();
+        assert_eq!(
+            p.matches_any(&[TokenKind::Identifier, TokenKind::And]),
+            true
+        );
+        p.next();
+        assert_eq!(
+            p.matches_any(&[TokenKind::From, TokenKind::Or, TokenKind::Slash]),
+            true
+        );
+        p.next();
+        assert_eq!(p.matches_any(&[TokenKind::Identifier]), true);
+        p.next();
+        assert_eq!(p.matches_any(&[TokenKind::Eof, TokenKind::Semicolon]), true);
+        p.next();
+        assert_eq!(p.matches_any(&[TokenKind::Eof, TokenKind::Semicolon]), true);
+        assert_eq!(p.matches_any(&[TokenKind::Eof]), true);
+        p.next();
+        assert_eq!(p.matches_any(&[TokenKind::Eof]), true);
+    }
+
+    #[test]
+    fn test_consume() {
+        let mut p = get_parser("SELECT hello FROM world;");
+
+        assert_eq!(
+            p.consume(TokenKind::Identifier, "expect ident")
+                .unwrap_err(),
+            "expect ident"
         );
 
         assert_eq!(
-            parse_literal("100").expect("expected valid literal"),
-            Literal::UnsignedInt(100)
+            p.consume(TokenKind::Select, "")
+                .expect("expected valid token")
+                .value,
+            Token::Select
         );
 
         assert_eq!(
-            parse_literal("100.100").expect("expected valid literal"),
-            Literal::Float(100.100)
+            p.consume(TokenKind::Identifier, "")
+                .expect("expected valid token")
+                .value,
+            Token::Identifier("hello".to_string())
         );
 
         assert_eq!(
-            parse_literal("true").expect("expected valid literal"),
-            Literal::Boolean(true)
+            p.consume(TokenKind::From, "")
+                .expect("expected valid token")
+                .value,
+            Token::From
         );
 
         assert_eq!(
-            parse_literal("false").expect("expected valid literal"),
-            Literal::Boolean(false)
+            p.consume(TokenKind::Identifier, "")
+                .expect("expected valid token")
+                .value,
+            Token::Identifier("world".to_string())
         );
 
         assert_eq!(
-            parse_literal("nil").expect("expected valid literal"),
-            Literal::Nil
+            p.consume(TokenKind::Semicolon, "")
+                .expect("expected valid token")
+                .value,
+            Token::Semicolon
+        );
+
+        assert_eq!(
+            p.consume(TokenKind::Eof, "")
+                .expect("expected valid token")
+                .value,
+            Token::Eof
+        );
+
+        assert_eq!(
+            p.consume(TokenKind::Identifier, "expect ident")
+                .unwrap_err(),
+            "expect ident"
+        );
+
+        assert_eq!(
+            p.consume(TokenKind::Eof, "")
+                .expect("expected valid token")
+                .value,
+            Token::Eof
+        );
+
+        assert_eq!(
+            p.consume(TokenKind::Eof, "")
+                .expect("expected valid token")
+                .value,
+            Token::Eof
         );
     }
 
     #[test]
-    fn test_parse_literal_err_not_literal() {
-        assert_eq!(parse_literal("nile").unwrap_err(), "TODO:");
+    fn test_parse() {
+        let stmts = get_parser(
+            "
+        SELECT uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post
+        WHERE slug == \"hello\"
+        LIMIT 1;
+
+        INSERT INTO blog_post(title, subtitle, img_src, slug, tags, body)
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);
+
+        // comment
+
+        CREATE TABLE blog_post_comment(
+            uuid TEXT,
+            created_at INT,
+            comment TEXT,
+            // another comment
+            email TEXT
+        );
+        ",
+        )
+        .parse()
+        .expect("expected valid statements");
+
+        assert_eq!(stmts.len(), 3);
+        assert_eq!(stmts[0], *SELECT_STMT);
+        assert_eq!(stmts[1], *INSERT_STMT);
+        assert_eq!(stmts[2], *CREATE_TABLE_STMT);
     }
 
     #[test]
-    fn test_parse_literal_err_empty() {
-        assert_eq!(parse_literal("").unwrap_err(), "TODO:");
+    fn test_parse_err_trailing_content() {
+        let err = get_parser(
+            "
+        SELECT uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post
+        WHERE slug == \"hello\"
+        LIMIT 1;
+
+        INSERT INTO blog_post(title, subtitle, img_src, slug, tags, body)
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);
+
+        // comment
+
+        CREATE TABLE blog_post_comment(
+            uuid TEXT,
+            created_at INT,
+            comment TEXT,
+            // another comment
+            email TEXT
+        );
+
+        something something
+        ",
+        )
+        .parse()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a new statement to begin after `;` at Ln 20");
     }
 
     #[test]
-    fn test_parse_list() {
-        let list = parse_list("list, test, yay");
+    fn test_parse_stmt() {
+        let stmt = get_parser(
+            "
+        SELECT uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post WHERE slug == \"hello\" LIMIT 1;",
+        )
+        .parse_stmt()
+        .expect("expected a valid statement");
+
+        assert_eq!(stmt, *SELECT_STMT)
+    }
+
+    #[test]
+    fn test_parse_stmt_err_no_semi() {
+        let err = get_parser(
+            "
+        SELECT uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post WHERE slug == \"hello\" LIMIT 1",
+        )
+        .parse_stmt()
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "Expected statement to be terminated by ';'".to_string()
+        )
+    }
+
+    #[test]
+    fn test_parse_stmt_err_unknown_stmt() {
+        let err = get_parser(
+            "
+        BLABLABLA uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post WHERE slug == \"hello\" LIMIT 1;",
+        )
+        .parse_stmt()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid statement".to_string())
+    }
+
+    #[test]
+    fn test_parse_select_ok() {
+        // SELECT literal will have been consumed already
+        let stmt = get_parser(
+            "
+        uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post WHERE slug == \"hello\" LIMIT 1;",
+        )
+        .parse_select()
+        .expect("expected valid SELECT statement");
+
+        assert_eq!(stmt, *SELECT_STMT)
+    }
+
+    #[test]
+    fn test_parse_select_ok_sans_opt() {
+        let stmt = get_parser(
+            "
+        uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post WHERE slug == \"hello\";",
+        )
+        .parse_select()
+        .expect("expected valid SELECT statement");
+
+        assert_eq!(
+            stmt,
+            Statement::Select(SelectStatement {
+                source: "blog_post".to_string(),
+                columns: vec!["uuid", "title", "subtitle", "img_src", "slug", "tags", "body",]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                exprs: vec![Expression {
+                    left: "slug".to_string(),
+                    operator: Operator::EqualEqual,
+                    right: Literal::String("hello".to_string()),
+                }],
+                opt: SelectOpt::None
+            })
+        )
+    }
+
+    #[test]
+    fn test_parse_select_ok_no_exprs() {
+        let stmt = get_parser(
+            "
+        uuid, title, subtitle, img_src, slug, tags, body
+        FROM blog_post;",
+        )
+        .parse_select()
+        .expect("expected valid SELECT statement");
+
+        assert_eq!(
+            stmt,
+            Statement::Select(SelectStatement {
+                source: "blog_post".to_string(),
+                columns: vec!["uuid", "title", "subtitle", "img_src", "slug", "tags", "body",]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                exprs: vec![],
+                opt: SelectOpt::None
+            })
+        )
+    }
+
+    #[test]
+    fn test_parse_select_err_no_columns() {
+        let err = get_parser(
+            "
+        FROM blog_post WHERE slug == \"hello\";",
+        )
+        .parse_select()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid column name".to_string())
+    }
+
+    #[test]
+    fn test_parse_select_err_no_from() {
+        let err = get_parser(
+            "
+        uuid, title, subtitle, img_src, slug, tags, body
+         blog_post WHERE slug == \"hello\";",
+        )
+        .parse_select()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected 'FROM' keyword after columns".to_string())
+    }
+
+    #[test]
+    fn test_parse_insert_ok() {
+        let stmt = get_parser(
+            "
+        INTO blog_post(title, subtitle, img_src, slug, tags, body)
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .expect("expected valid insert statement");
+
+        assert_eq!(
+            stmt,
+            Statement::Insert(InsertStatement {
+                columns: vec!["title", "subtitle", "img_src", "slug", "tags", "body"]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                dest: "blog_post".to_string(),
+                values: vec![
+                    Literal::String("a".to_string()),
+                    Literal::String("b".to_string()),
+                    Literal::Nil,
+                    Literal::UnsignedInt(1),
+                    Literal::Float(2.0),
+                    Literal::Boolean(true)
+                ]
+            })
+        )
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_into() {
+        let err = get_parser(
+            "
+         blog_post(title, subtitle, img_src, slug, tags, body)
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected 'INTO' keyword");
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_dest() {
+        let err = get_parser(
+            "
+        INTO (title, subtitle, img_src, slug, tags, body)
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a destination table name");
+    }
+
+    #[test]
+    fn test_parse_insert_err_empty_columns() {
+        let err = get_parser(
+            "
+        INTO blog_post()
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid column name");
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_columns_parens() {
+        let err = get_parser(
+            "
+        INTO blog_post title, subtitle, img_src, slug, tags, body
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected '(' before columns");
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_columns_no_parens() {
+        let err = get_parser(
+            "
+        INTO blog_post
+        VALUES(\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected '(' before columns");
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_values() {
+        let err = get_parser(
+            "
+        INTO blog_post (title, subtitle, img_src, slug, tags, body)
+        (\"a\", \"b\", nil, 1, 2.0, true);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected 'VALUES' keyword");
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_values_parens() {
+        let err = get_parser(
+            "
+        INTO blog_post (title, subtitle, img_src, slug, tags, body)
+        VALUES \"a\", \"b\", nil, 1, 2.0, true;",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected '(' before values");
+    }
+
+    #[test]
+    fn test_parse_insert_err_empty_values() {
+        let err = get_parser(
+            "
+        INTO blog_post (title, subtitle, img_src, slug, tags, body)
+        VALUES ();",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid literal");
+    }
+
+    #[test]
+    fn test_parse_insert_err_no_values_no_parens() {
+        let err = get_parser(
+            "
+        INTO blog_post (title, subtitle, img_src, slug, tags, body)
+        VALUES;",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected '(' before values");
+    }
+
+    #[test]
+    fn test_parse_insert_err_mismatched_values() {
+        let err = get_parser(
+            "
+        INTO blog_post(title, subtitle, img_src, slug, tags, body)
+        VALUES (1,2,3,4,5);",
+        )
+        .parse_insert()
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "Mismatched columns and values; expected 6 values but got 5"
+        );
+    }
+
+    #[test]
+    fn test_parse_create_table_ok() {
+        let stmt = get_parser(
+            "
+            TABLE blog_post_comment(
+                uuid TEXT,
+                created_at INT,
+                comment TEXT      ,
+                // comment
+                email TEXT
+                // TODO: words TEXT[]
+            );",
+        )
+        .parse_create_table()
+        .expect("expected valid CREATE statement");
+
+        assert_eq!(stmt, *CREATE_TABLE_STMT)
+    }
+
+    #[test]
+    fn test_parse_create_table_err_no_table_kw() {
+        let err = get_parser(
+            "
+            blog_post_comment(
+                uuid TEXT,
+                created_at INT,
+                comment TEXT      ,
+                // comment
+                email TEXT
+            );",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected 'TABLE' keyword".to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_err_no_name() {
+        let err = get_parser(
+            "
+            TABLE (
+                uuid TEXT,
+                created_at INT,
+                comment TEXT      ,
+                // comment
+                email TEXT
+                // TODO: words TEXT[]
+            );",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid table name".to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_err_no_open_paren() {
+        let err = get_parser(
+            "
+            TABLE blog_post_comment
+                uuid TEXT,
+                created_at INT,
+                comment TEXT      ,
+                // comment
+                email TEXT
+            );",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected '(' before columns".to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_err_no_columns() {
+        let err = get_parser(
+            "
+            TABLE blog_post_comment;",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected '(' before columns".to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_err_empty_columns() {
+        let err = get_parser(
+            "
+            TABLE blog_post_comment(
+                // words TEXT[]
+            );",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid column name".to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_err_dangling_comma() {
+        let err = get_parser(
+            "
+            TABLE blog_post_comment(
+                email TEXT,
+            );",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected a valid column name".to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_err_no_closing_paren() {
+        let err = get_parser(
+            "
+            TABLE blog_post_comment(
+                email TEXT
+            ;",
+        )
+        .parse_create_table()
+        .unwrap_err();
+
+        assert_eq!(err, "Expected ')' after columns".to_string());
+    }
+
+    #[test]
+    fn test_parse_columns() {
+        let list = get_parser("list, test, yay")
+            .parse_columns()
+            .expect("expected valid ident list");
 
         assert_eq!(list.len(), 3);
         assert_eq!(list[0], "list");
@@ -291,62 +1089,177 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_single_el() {
-        let list = parse_list("test");
+    fn test_parse_columns_single_el() {
+        let list = get_parser("test")
+            .parse_columns()
+            .expect("expected valid ident list");
 
         assert_eq!(list.len(), 1);
         assert_eq!(list[0], "test");
     }
 
     #[test]
-    fn test_parse_list_single_el_trailing_comma() {
-        let list = parse_list("test,");
-
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0], "test");
+    fn test_parse_columns_err_empty() {
+        let err = get_parser("").parse_columns().unwrap_err();
+        assert_eq!(err, "Expected a valid column name".to_string());
     }
 
     #[test]
-    fn test_parse_list_empty() {
-        let list = parse_list("");
+    fn test_parse_columns_err_trailing_comma() {
+        let err = get_parser("test,").parse_columns().unwrap_err();
+        assert_eq!(err, "Expected a valid column name");
+    }
 
-        assert_eq!(list.len(), 0);
+    #[test]
+    fn test_parse_column_config_ok() {
+        let col_conf = get_parser("my_col TEXT")
+            .parse_column_config()
+            .expect("expected valid column config");
+
+        assert_eq!(
+            col_conf,
+            ColumnConfig {
+                name: "my_col".to_string(),
+                t: ColumnType::Text
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_column_config_err_invalid_type() {
+        let err = get_parser("my_col TExXT")
+            .parse_column_config()
+            .unwrap_err();
+
+        assert_eq!(err, "Expected a valid column type".to_string());
+    }
+
+    #[test]
+    fn test_parse_column_config_err_kw_used_as_colname() {
+        let err = get_parser("false TEXT").parse_column_config().unwrap_err();
+
+        assert_eq!(err, "Expected a valid column name".to_string());
+    }
+
+    #[test]
+    fn test_parse_opt_ok() {
+        let opt = get_parser("LIMIT 5")
+            .parse_opt()
+            .expect("expected valid select opt");
+        assert_eq!(opt, SelectOpt::Limit(5));
+    }
+
+    #[test]
+    fn test_parse_opt_err_invalid_value_type() {
+        let err = get_parser("LIMIT 5.0").parse_opt().unwrap_err();
+        assert_eq!(err, "Expected an unsigned integer".to_string());
+    }
+
+    #[test]
+    fn test_parse_opt_err_no_value_type() {
+        let err = get_parser("LIMIT ").parse_opt().unwrap_err();
+        assert_eq!(err, "Expected an unsigned integer".to_string());
+    }
+
+    #[test]
+    fn test_parse_opt_err_non_opt() {
+        let err = get_parser("SELECT 5").parse_opt().unwrap_err();
+        assert_eq!(err, "Expected a valid opt type".to_string());
+    }
+
+    #[test]
+    fn test_parse_exprs_ok() {
+        let maybe_exprs = get_parser("hello == \"world\" AND won == 3 OR won != 22")
+            .parse_exprs()
+            .expect("expected valid expressions");
+
+        assert_eq!(maybe_exprs.len(), 3);
+        assert_eq!(
+            maybe_exprs[0],
+            Expression {
+                left: "hello".to_string(),
+                operator: Operator::EqualEqual,
+                right: Literal::String("world".to_string())
+            }
+        );
+        assert_eq!(
+            maybe_exprs[1],
+            Expression {
+                left: "won".to_string(),
+                operator: Operator::EqualEqual,
+                right: Literal::UnsignedInt(3)
+            }
+        );
+        assert_eq!(
+            maybe_exprs[2],
+            Expression {
+                left: "won".to_string(),
+                operator: Operator::BangEqual,
+                right: Literal::UnsignedInt(22)
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_exprs_err_empty() {
+        let err = get_parser("").parse_exprs().unwrap_err();
+        assert_eq!(err, "Expected a valid column name as lvalue");
+    }
+
+    #[test]
+    fn test_parse_exprs_err_trailing_conjunction() {
+        let err = get_parser("world == \"earth\" AND")
+            .parse_exprs()
+            .unwrap_err();
+        assert_eq!(err, "Expected a valid column name as lvalue");
     }
 
     #[test]
     fn test_parse_expr_ok() {
-        let maybe_expr = parse_expr("hello == \"world\"").expect("expected valid expression");
+        let maybe_expr = get_parser("hello == \"world\"")
+            .parse_expr()
+            .expect("expected valid expression");
 
         assert_eq!(maybe_expr.left, "hello");
         assert_eq!(maybe_expr.operator, Operator::EqualEqual);
         assert_eq!(maybe_expr.right, Literal::String("world".to_string()));
 
-        let maybe_expr = parse_expr("hello != true").expect("expected valid expression");
+        let maybe_expr = get_parser("hello != true")
+            .parse_expr()
+            .expect("expected valid expression");
 
         assert_eq!(maybe_expr.left, "hello");
         assert_eq!(maybe_expr.operator, Operator::BangEqual);
         assert_eq!(maybe_expr.right, Literal::Boolean(true));
 
-        let maybe_expr = parse_expr("hello > 9").expect("expected valid expression");
+        let maybe_expr = get_parser("hello > 9")
+            .parse_expr()
+            .expect("expected valid expression");
 
         assert_eq!(maybe_expr.left, "hello");
         assert_eq!(maybe_expr.operator, Operator::Greater);
         assert_eq!(maybe_expr.right, Literal::UnsignedInt(9));
 
         // TODO: disallow comp on bools and null
-        let maybe_expr = parse_expr("hello >= \"world\"").expect("expected valid expression");
+        let maybe_expr = get_parser("hello >= \"world\"")
+            .parse_expr()
+            .expect("expected valid expression");
 
         assert_eq!(maybe_expr.left, "hello");
         assert_eq!(maybe_expr.operator, Operator::GreaterEqual);
         assert_eq!(maybe_expr.right, Literal::String("world".to_string()));
 
-        let maybe_expr = parse_expr("hello < 100.21").expect("expected valid expression");
+        let maybe_expr = get_parser("hello < 100.21")
+            .parse_expr()
+            .expect("expected valid expression");
 
         assert_eq!(maybe_expr.left, "hello");
         assert_eq!(maybe_expr.operator, Operator::Less);
         assert_eq!(maybe_expr.right, Literal::Float(100.21));
 
-        let maybe_expr = parse_expr("hello <= \"world\"").expect("expected valid expression");
+        let maybe_expr = get_parser("hello <= \"world\"")
+            .parse_expr()
+            .expect("expected valid expression");
 
         assert_eq!(maybe_expr.left, "hello");
         assert_eq!(maybe_expr.operator, Operator::LessEqual);
@@ -355,40 +1268,123 @@ mod tests {
 
     #[test]
     fn test_parse_expr_err_no_right() {
-        let err = parse_expr("hello <=").unwrap_err();
-        assert_eq!(err, "TODO:");
+        let err = get_parser("hello <=").parse_expr().unwrap_err();
+        assert_eq!(err, "Expected a valid literal");
     }
 
     #[test]
     fn test_parse_expr_err_no_left() {
-        let err = parse_expr(" <= \"world\"").unwrap_err();
-        assert_eq!(err, "TODO:");
+        let err = get_parser(" <= \"world\"").parse_expr().unwrap_err();
+        assert_eq!(err, "Expected a valid column name as lvalue");
     }
 
     #[test]
     fn test_parse_expr_err_no_operator() {
-        let err = parse_expr("hello \"world\"").unwrap_err();
-
-        assert_eq!(err, "value TODO: impl display is not a valid operator");
+        let err = get_parser("hello \"world\"").parse_expr().unwrap_err();
+        assert_eq!(err, "Expected a valid operator");
     }
 
     #[test]
     fn test_parse_expr_err_invalid_operator() {
-        let err = parse_expr("hello ! \"world\"").unwrap_err();
+        let err = get_parser("hello ! \"world\"").parse_expr().unwrap_err();
 
-        assert_eq!(err, "value TODO: impl display is not a valid operator");
+        assert_eq!(err, "Expected a valid operator");
     }
 
     #[test]
     fn test_parse_expr_err_non_literal_right() {
-        let err = parse_expr("hello == CREATE").unwrap_err();
+        let err = get_parser("hello == CREATE").parse_expr().unwrap_err();
 
-        assert_eq!(err, "TODO:");
+        assert_eq!(err, "Expected a valid literal");
     }
 
     #[test]
-    fn test_parse_exprs_ok() {
-        let maybe_exprs =
-            parse_exprs("hello == \"world\" AND won == 3").expect("expected valid expressions");
+    fn test_parse_literal_ok() {
+        assert_eq!(
+            get_parser("\"text\"")
+                .parse_literal()
+                .expect("expected valid literal"),
+            Literal::String("text".to_string())
+        );
+
+        assert_eq!(
+            get_parser("100")
+                .parse_literal()
+                .expect("expected valid literal"),
+            Literal::UnsignedInt(100)
+        );
+
+        assert_eq!(
+            get_parser("100.100")
+                .parse_literal()
+                .expect("expected valid literal"),
+            Literal::Float(100.100)
+        );
+
+        assert_eq!(
+            get_parser("true")
+                .parse_literal()
+                .expect("expected valid literal"),
+            Literal::Boolean(true)
+        );
+
+        assert_eq!(
+            get_parser("false")
+                .parse_literal()
+                .expect("expected valid literal"),
+            Literal::Boolean(false)
+        );
+
+        assert_eq!(
+            get_parser("nil")
+                .parse_literal()
+                .expect("expected valid literal"),
+            Literal::Nil
+        );
+    }
+
+    // TODO: code cov tool
+    #[test]
+    fn test_parse_literals_ok() {
+        let lits = get_parser("true, false, nil, 1, \"hi\"")
+            .parse_literals()
+            .expect("expected valid literals");
+        assert_eq!(lits.len(), 5);
+    }
+
+    #[test]
+    fn test_parse_literals_ok_single() {
+        let lits = get_parser("true")
+            .parse_literals()
+            .expect("expected valid literals");
+        assert_eq!(lits.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_literals_err_trailing_comma() {
+        let err = get_parser("true,").parse_literals().unwrap_err();
+        assert_eq!(err, "Expected a valid literal");
+    }
+
+    #[test]
+    fn test_parse_literals_err_empty() {
+        let err = get_parser("").parse_literals().unwrap_err();
+        assert_eq!(err, "Expected a valid literal");
+    }
+
+    #[test]
+    fn test_parse_literal_err_not_literal() {
+        assert_eq!(
+            get_parser("nile").parse_literal().unwrap_err(),
+            "Expected a valid literal"
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_err_empty() {
+        assert_eq!(
+            get_parser("").parse_literal().unwrap_err(),
+            "Expected a valid literal"
+        );
     }
 }

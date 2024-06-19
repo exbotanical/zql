@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use lazy_static::lazy_static;
 
 use crate::{
-    pos::{BytePos, WithPosRange},
+    pos::{BytePos, WithPosMetadata},
     scanner::Scanner,
     token::Token,
 };
@@ -47,8 +47,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<WithPosRange<Token>> {
-        let mut tokens: Vec<WithPosRange<Token>> = Vec::new();
+    pub fn tokenize(&mut self) -> Vec<WithPosMetadata<Token>> {
+        let mut tokens: Vec<WithPosMetadata<Token>> = Vec::new();
 
         loop {
             let start = self.scanner.pos;
@@ -58,15 +58,16 @@ impl<'a> Lexer<'a> {
                 None => break,
             };
 
-            if let Some(tok) = self.match_token(c) {
-                match tok {
+            if let Some(token) = self.match_token(c) {
+                match token {
                     Token::Erroneous(s) => panic!("error: {}", s),
-                    _ => tokens.push(WithPosRange::new(
-                        tok,
+                    _ => tokens.push(WithPosMetadata::new(
+                        token,
                         start,
                         BytePos {
                             0: self.scanner.pos.0 - 1,
                         },
+                        self.line,
                     )),
                 }
             }
@@ -116,8 +117,7 @@ impl<'a> Lexer<'a> {
             }
             '/' => {
                 if self.scanner.consume_if(|c| c == '/') {
-                    let chars = self.scanner.consume_while(|c| c != '\n');
-                    self.line = self.line + chars.len();
+                    self.scanner.consume_while(|c| c != '\n');
                     None
                 } else {
                     Some(Token::Slash)
@@ -127,6 +127,7 @@ impl<'a> Lexer<'a> {
             '\r' => None,
             '\t' => None,
             '\n' => {
+                // TODO: test line
                 self.line = self.line + 1;
                 None
             }
@@ -182,7 +183,7 @@ impl<'a> Lexer<'a> {
 
         let part: String = self
             .scanner
-            .consume_while(|c| c.is_ascii_alphanumeric())
+            .consume_while(|c| c.is_ascii_alphanumeric() || c == '_') // TODO: test _
             .into_iter()
             .collect();
 
