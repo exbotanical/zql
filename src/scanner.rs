@@ -2,8 +2,6 @@ use std::{iter::Peekable, str::Chars};
 
 use crate::pos::BytePos;
 
-const NULL_CHAR: char = '\u{0000}';
-
 pub struct Scanner<'a> {
     pub pos: BytePos,
     buf: Peekable<Chars<'a>>,

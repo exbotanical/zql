@@ -11,8 +11,13 @@ static EOF_TOKEN: WithPosMetadata<Token> = WithPosMetadata::empty(Token::Eof);
 
 static STATEMENT_KEYWORDS: [TokenKind; 3] =
     [TokenKind::Insert, TokenKind::Select, TokenKind::Create];
-static COLUMN_TYPES: [TokenKind; 2] = [TokenKind::Int, TokenKind::Text];
-static EXPR_CONJUNCTIONS: [TokenKind; 2] = [TokenKind::And, TokenKind::Or];
+static COMPARISON_TOKENS: [TokenKind; 4] = [
+    TokenKind::Greater,
+    TokenKind::GreaterEqual,
+    TokenKind::Less,
+    TokenKind::LessEqual,
+];
+static EQUALITY_TOKENS: [TokenKind; 2] = [TokenKind::BangEqual, TokenKind::EqualEqual];
 
 pub struct Parser {
     tokens: Vec<WithPosMetadata<Token>>,
@@ -298,19 +303,19 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        let expr = self.parse_or()?;
-
-        // if expr.right
-        Ok(expr)
+        match self.parse_or()? {
+            Expr::Literal(_) | Expr::Identifier(_) => Err("Expected an expression".to_string()),
+            expr => Ok(expr),
+        }
     }
 
     fn parse_or(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_and()?;
+        let mut expr = self.parse_and(true)?;
 
         while self.check(TokenKind::Or) {
             self.consume(TokenKind::Or, "Expected 'OR'")?;
 
-            let right = self.parse_and()?;
+            let right = self.parse_and(false)?;
             expr = Expr::Logical(Logical {
                 left: Box::new(expr),
                 operator: Operator::Or,
@@ -321,13 +326,13 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_eq()?;
+    fn parse_and(&mut self, is_left: bool) -> Result<Expr, String> {
+        let mut expr = self.parse_eq(is_left)?;
 
         while self.check(TokenKind::And) {
             self.consume(TokenKind::And, "Expected 'AND'")?;
 
-            let right = self.parse_eq()?;
+            let right = self.parse_eq(false)?;
             expr = Expr::Logical(Logical {
                 left: Box::new(expr),
                 operator: Operator::And,
@@ -338,17 +343,16 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_comparison(&mut self) -> Result<Expr, String> {
-        let mut expr: Expr = self.parse_primary()?;
+    fn parse_comparison(&mut self, is_left: bool) -> Result<Expr, String> {
+        let mut expr = if is_left {
+            self.parse_left_primary()
+        } else {
+            self.parse_right_primary()
+        }?;
 
-        while self.matches_any(&[
-            TokenKind::Greater,
-            TokenKind::GreaterEqual,
-            TokenKind::Less,
-            TokenKind::LessEqual,
-        ]) {
+        while self.matches_any(&COMPARISON_TOKENS) {
             let token = self.next().value.clone();
-            let right: Expr = self.parse_primary()?;
+            let right = self.parse_right_primary()?;
             expr = Expr::Binary(Binary {
                 left: Box::new(expr),
                 operator: token.try_into()?,
@@ -359,12 +363,12 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_eq(&mut self) -> Result<Expr, String> {
-        let mut expr: Expr = self.parse_comparison()?;
+    fn parse_eq(&mut self, is_left: bool) -> Result<Expr, String> {
+        let mut expr: Expr = self.parse_comparison(is_left)?;
 
-        while self.matches_any(&[TokenKind::BangEqual, TokenKind::EqualEqual]) {
+        while self.matches_any(&EQUALITY_TOKENS) {
             let token = self.next().value.clone();
-            let right: Expr = self.parse_comparison()?;
+            let right: Expr = self.parse_comparison(false)?;
             expr = Expr::Binary(Binary {
                 left: Box::new(expr),
                 operator: token.try_into()?,
@@ -375,9 +379,33 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, String> {
+    fn parse_left_primary(&mut self) -> Result<Expr, String> {
+        match &self.next().value {
+            Token::Identifier(v) => Ok(Expr::Identifier(Identifier {
+                value: v.to_owned(),
+            })),
+            Token::LeftParen => {
+                let expr = self.parse_expr()?;
+                self.consume(
+                    TokenKind::RightParen,
+                    "Expected ')' after nested expression",
+                )?;
+
+                Ok(Expr::Grouping(Grouping {
+                    expr: Box::new(expr),
+                }))
+            }
+            _ => Err(
+                "Expected either an identifier or nested expression for left side of expression"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn parse_right_primary(&mut self) -> Result<Expr, String> {
         match &self.next().value {
             // TODO: try_into?
+            // TODO: dedupe parse_literal
             Token::False => Ok(Expr::Literal(Literal::Boolean(false))),
             Token::True => Ok(Expr::Literal(Literal::Boolean(true))),
             Token::Nil => Ok(Expr::Literal(Literal::Nil)),
@@ -389,26 +417,28 @@ impl Parser {
             })),
             Token::LeftParen => {
                 let expr = self.parse_expr()?;
-                self.consume(TokenKind::RightParen, "TODO:")?;
+                self.consume(
+                    TokenKind::RightParen,
+                    "Expected ')' after nested expression",
+                )?;
 
                 Ok(Expr::Grouping(Grouping {
                     expr: Box::new(expr),
                 }))
             }
-            _ => Err("CCM".to_string()),
+            _ => Err("Expected either a primitive, identifier, or nested expression for right side of expression".to_string()),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-
     use lazy_static::lazy_static;
 
     use crate::{
         lexer::Lexer,
         stmt::{
-            Binary, ColumnConfig, ColumnType, CreateTableStatement, Expr, Identifier,
+            Binary, ColumnConfig, ColumnType, CreateTableStatement, Expr, Grouping, Identifier,
             InsertStatement, Literal, Logical, SelectOpt, SelectStatement, Statement,
         },
         token::{Operator, Token, TokenKind},
@@ -1063,7 +1093,6 @@ mod tests {
                 comment TEXT      ,
                 // comment
                 email TEXT
-                // TODO: words TEXT[]
             );",
         )
         .parse_create_table()
@@ -1367,9 +1396,92 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_expr_ok_left_compound() {
+        let expr = get_parser("(hello == \"world\" AND won == 3) OR won != 22")
+            .parse_expr()
+            .expect("expected valid expressions");
+
+        assert_eq!(
+            expr,
+            Expr::Logical(Logical {
+                left: Box::new(Expr::Grouping(Grouping {
+                    expr: Box::new(Expr::Logical(Logical {
+                        left: Box::new(Expr::Binary(Binary {
+                            left: Box::new(Expr::Identifier(Identifier {
+                                value: "hello".to_string(),
+                            })),
+                            operator: Operator::EqualEqual,
+                            right: Box::new(Expr::Literal(Literal::String("world".to_string()))),
+                        })),
+                        operator: Operator::And,
+                        right: Box::new(Expr::Binary(Binary {
+                            left: Box::new(Expr::Identifier(Identifier {
+                                value: "won".to_string(),
+                            })),
+                            operator: Operator::EqualEqual,
+                            right: Box::new(Expr::Literal(Literal::UnsignedInt(3))),
+                        })),
+                    })),
+                })),
+                operator: Operator::Or,
+                right: Box::new(Expr::Binary(Binary {
+                    left: Box::new(Expr::Identifier(Identifier {
+                        value: "won".to_string(),
+                    })),
+                    operator: Operator::BangEqual,
+                    right: Box::new(Expr::Literal(Literal::UnsignedInt(22))),
+                })),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_ok_right_compound() {
+        let expr = get_parser("hello == \"world\" AND (won == 3 OR won != 22)")
+            .parse_expr()
+            .expect("expected valid expressions");
+
+        assert_eq!(
+            expr,
+            Expr::Logical(Logical {
+                left: Box::new(Expr::Binary(Binary {
+                    left: Box::new(Expr::Identifier(Identifier {
+                        value: String::from("hello")
+                    })),
+                    operator: Operator::EqualEqual,
+                    right: Box::new(Expr::Literal(Literal::String(String::from("world"))))
+                })),
+                operator: Operator::And,
+                right: Box::new(Expr::Grouping(Grouping {
+                    expr: Box::new(Expr::Logical(Logical {
+                        left: Box::new(Expr::Binary(Binary {
+                            left: Box::new(Expr::Identifier(Identifier {
+                                value: String::from("won")
+                            })),
+                            operator: Operator::EqualEqual,
+                            right: Box::new(Expr::Literal(Literal::UnsignedInt(3)))
+                        })),
+                        operator: Operator::Or,
+                        right: Box::new(Expr::Binary(Binary {
+                            left: Box::new(Expr::Identifier(Identifier {
+                                value: String::from("won")
+                            })),
+                            operator: Operator::BangEqual,
+                            right: Box::new(Expr::Literal(Literal::UnsignedInt(22)))
+                        }))
+                    }))
+                }))
+            })
+        );
+    }
+
+    #[test]
     fn test_parse_expr_err_empty() {
         let err = get_parser("").parse_expr().unwrap_err();
-        // assert_eq!(err, "Expected a valid column name as lvalue");
+        assert_eq!(
+            err,
+            "Expected either an identifier or nested expression for left side of expression"
+        );
     }
 
     #[test]
@@ -1377,42 +1489,43 @@ mod tests {
         let err = get_parser("world == \"earth\" AND")
             .parse_expr()
             .unwrap_err();
-        // assert_eq!(err, "Expected a valid column name as lvalue");
+        assert_eq!(err, "Expected either a primitive, identifier, or nested expression for right side of expression");
     }
 
     #[test]
     fn test_parse_expr_err_no_right() {
         let err = get_parser("hello <=").parse_expr().unwrap_err();
-        // assert_eq!(err, "Expected a valid literal");
+        assert_eq!(err, "Expected either a primitive, identifier, or nested expression for right side of expression");
     }
 
     #[test]
     fn test_parse_expr_err_no_left() {
         let err = get_parser(" <= \"world\"").parse_expr().unwrap_err();
-        // assert_eq!(err, "Expected a valid column name as lvalue");
+        assert_eq!(
+            err,
+            "Expected either an identifier or nested expression for left side of expression"
+        );
     }
 
     #[test]
     fn test_parse_expr_err_no_operator() {
-        let err = get_parser("hello \"world\"").parse_expr().expect("msg");
-        println!("err> {:#?}", err);
-
         let err = get_parser("hello \"world\"").parse_expr().unwrap_err();
-        assert_eq!(err, "Expected a valid operator");
+        assert_eq!(err, "Expected an expression");
     }
 
     #[test]
     fn test_parse_expr_err_invalid_operator() {
         let err = get_parser("hello ! \"world\"").parse_expr().unwrap_err();
-
-        assert_eq!(err, "Expected a valid operator");
+        assert_eq!(err, "Expected an expression");
     }
 
     #[test]
     fn test_parse_expr_err_non_literal_right() {
         let err = get_parser("hello == CREATE").parse_expr().unwrap_err();
-
-        // assert_eq!(err, "Expected a valid literal");
+        assert_eq!(
+            err,
+            "Expected either a primitive, identifier, or nested expression for right side of expression"
+        );
     }
 
     #[test]
