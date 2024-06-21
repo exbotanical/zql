@@ -17,24 +17,38 @@ pub enum SelectOpt {
 pub struct SelectStatement {
     pub source: String,
     pub columns: Vec<String>,
-    pub exprs: Vec<Expression>,
+    pub expr: Expr,
     pub opt: SelectOpt, // TODO: multiple?
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Expression {
-    // TODO: allow both sides to be literal or identifier
-    pub left: String,
-    pub operator: Operator,
-    pub right: Literal,
+pub enum Expr {
+    Grouping(Grouping),
+    Logical(Logical),
+    Binary(Binary),
+    Literal(Literal),
+    Identifier(Identifier),
+    None,
 }
 
-/*
-    SELECT * FROM table WHERE
-    col2 == 2 OR (col3 == 4 AND col1 == 2)
-    (col2 == 2 OR col3 == 4) AND col1 == 2
-    LIMIT 100;
-*/
+#[derive(Debug, PartialEq)]
+pub struct Grouping {
+    pub expr: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Logical {
+    pub left: Box<Expr>,
+    pub operator: Operator,
+    pub right: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Binary {
+    pub left: Box<Expr>,
+    pub operator: Operator,
+    pub right: Box<Expr>,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Literal {
@@ -43,6 +57,11 @@ pub enum Literal {
     Float(f64),
     UnsignedInt(u64),
     Nil,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Identifier {
+    pub value: String,
 }
 
 #[derive(Debug, PartialEq)]

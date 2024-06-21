@@ -160,6 +160,8 @@ pub enum Operator {
     GreaterEqual,
     Less,
     LessEqual,
+    Or,
+    And,
 }
 
 impl TryInto<Operator> for Token {
