@@ -8,17 +8,16 @@ impl BytePos {
 }
 
 #[derive(Debug)]
-pub struct PosMetadata {
+pub struct TokenMetadata {
     pub start_inclusive: BytePos,
     pub end_inclusive: BytePos,
     pub line: usize,
-    // TODO: col
 }
 
-impl PosMetadata {
-    pub const fn empty() -> PosMetadata {
+impl TokenMetadata {
+    pub const fn empty() -> TokenMetadata {
         let zero = BytePos(0);
-        PosMetadata {
+        TokenMetadata {
             start_inclusive: zero,
             end_inclusive: zero,
             line: 0,
@@ -27,21 +26,21 @@ impl PosMetadata {
 }
 
 #[derive(Debug)]
-pub struct WithPosMetadata<T> {
+pub struct WithTokenMetadata<T> {
     pub value: T,
-    pub pos: PosMetadata,
+    pub pos: TokenMetadata,
 }
 
-impl<T> WithPosMetadata<T> {
+impl<T> WithTokenMetadata<T> {
     pub fn new(
         value: T,
         start_inclusive: BytePos,
         end_inclusive: BytePos,
-        line: usize, // TODO: when to use usize vs u64?
-    ) -> WithPosMetadata<T> {
-        WithPosMetadata {
+        line: usize,
+    ) -> WithTokenMetadata<T> {
+        WithTokenMetadata {
             value,
-            pos: PosMetadata {
+            pos: TokenMetadata {
                 start_inclusive,
                 end_inclusive,
                 line,
@@ -49,10 +48,10 @@ impl<T> WithPosMetadata<T> {
         }
     }
 
-    pub const fn empty(value: T) -> WithPosMetadata<T> {
-        WithPosMetadata {
+    pub const fn empty(value: T) -> WithTokenMetadata<T> {
+        WithTokenMetadata {
             value,
-            pos: PosMetadata::empty(),
+            pos: TokenMetadata::empty(),
         }
     }
 }

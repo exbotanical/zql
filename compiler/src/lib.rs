@@ -1,3 +1,4 @@
+mod expr;
 mod lexer;
 pub mod parser;
 mod pos;

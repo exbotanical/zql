@@ -1,13 +1,5 @@
-[package]
-name = "zql"
-version = "0.1.0"
-edition = "2021"
+[workspace]
 
-[dependencies]
-lazy_static = "^1.1.1"
-
-[package.metadata.scripts]
-'test:cov' = "cargo llvm-cov"
-'test:cov:dev' = "cargo watch -x 'llvm-cov'"
-'test:dev' = "cargo watch -x 'test -- --nocapture'"
-'install' = "./scripts/install.sh"
+members = [
+  "compiler", "zql", "zqld",
+]

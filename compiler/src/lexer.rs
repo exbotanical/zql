@@ -1,38 +1,10 @@
-use std::collections::HashMap;
-
-use lazy_static::lazy_static;
+use std::str::FromStr;
 
 use crate::{
-    pos::{BytePos, WithPosMetadata},
+    pos::{BytePos, WithTokenMetadata},
     scanner::Scanner,
     token::Token,
 };
-
-lazy_static! {
-    static ref KEYWORDS_MAP: HashMap<&'static str, &'static str> = {
-        let mut m = HashMap::new();
-
-        // TODO: keyword into -> str key
-        m.insert("CREATE", "CREATE");
-        m.insert("INSERT", "INSERT");
-        m.insert("TABLE", "TABLE");
-        m.insert("WHERE", "WHERE");
-        m.insert("SELECT", "SELECT");
-        m.insert("FROM", "FROM");
-        m.insert("INTO", "INTO");
-        m.insert("LIMIT", "LIMIT");
-        m.insert("AND", "AND");
-        m.insert("OR", "OR");
-        m.insert("VALUES", "VALUES");
-        m.insert("TEXT", "TEXT");
-        m.insert("INT", "INT");
-        m.insert("false", "false");
-        m.insert("true", "true");
-        m.insert("nil", "nil");
-
-        m
-    };
-}
 
 pub struct Lexer<'a> {
     scanner: Scanner<'a>,
@@ -47,8 +19,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<WithPosMetadata<Token>> {
-        let mut tokens: Vec<WithPosMetadata<Token>> = Vec::new();
+    pub fn tokenize(&mut self) -> Vec<WithTokenMetadata<Token>> {
+        let mut tokens: Vec<WithTokenMetadata<Token>> = Vec::new();
 
         loop {
             let start = self.scanner.pos;
@@ -61,7 +33,7 @@ impl<'a> Lexer<'a> {
             if let Some(token) = self.match_token(c) {
                 match token {
                     Token::Erroneous(s) => panic!("error: {}", s),
-                    _ => tokens.push(WithPosMetadata::new(
+                    _ => tokens.push(WithTokenMetadata::new(
                         token,
                         start,
                         BytePos {
@@ -99,7 +71,6 @@ impl<'a> Lexer<'a> {
                     Some(Token::Equal)
                 }
             }
-
             '<' => {
                 if self.scanner.consume_if(|c| c == '=') {
                     Some(Token::LessEqual)
@@ -107,7 +78,6 @@ impl<'a> Lexer<'a> {
                     Some(Token::Less)
                 }
             }
-
             '>' => {
                 if self.scanner.consume_if(|c| c == '=') {
                     Some(Token::GreaterEqual)
@@ -127,7 +97,6 @@ impl<'a> Lexer<'a> {
             '\r' => None,
             '\t' => None,
             '\n' => {
-                // TODO: test line
                 self.line = self.line + 1;
                 None
             }
@@ -143,7 +112,7 @@ impl<'a> Lexer<'a> {
                     _ => Some(Token::String(string)),
                 }
             }
-            c if c.is_numeric() => self.tokenize_number(c),
+            c if c.is_numeric() || c == '-' => self.tokenize_number(c),
             c if c.is_ascii_alphabetic() => self.tokenize_ident(c),
             c => Some(Token::Erroneous(format!("unknown char {}", c))),
         }
@@ -173,7 +142,11 @@ impl<'a> Lexer<'a> {
 
             Some(Token::Float(number.parse::<f64>().unwrap()))
         } else {
-            Some(Token::UnsignedInt(number.parse::<u64>().unwrap()))
+            if start == '-' {
+                Some(Token::SignedInt(number.parse::<i64>().unwrap()))
+            } else {
+                Some(Token::UnsignedInt(number.parse::<u64>().unwrap()))
+            }
         }
     }
 
@@ -183,32 +156,32 @@ impl<'a> Lexer<'a> {
 
         let part: String = self
             .scanner
-            .consume_while(|c| c.is_ascii_alphanumeric() || c == '_') // TODO: test _
+            .consume_while(|c| c.is_ascii_alphanumeric() || c == '_')
             .into_iter()
             .collect();
 
         string.push_str(part.as_str());
 
-        Some(match string.as_str() {
-            // TODO: keyword into -> str key
-            "CREATE" => Token::Create,
-            "INSERT" => Token::Insert,
-            "TABLE" => Token::Table,
-            "WHERE" => Token::Where,
-            "SELECT" => Token::Select,
-            "FROM" => Token::From,
-            "INTO" => Token::Into,
-            "LIMIT" => Token::Limit,
-            "AND" => Token::And,
-            "OR" => Token::Or,
-            "VALUES" => Token::Values,
-            "TEXT" => Token::Text,
-            "INT" => Token::Int,
-            "false" => Token::False,
-            "true" => Token::True,
-            "nil" => Token::Nil,
-            _ => Token::Identifier(string),
+        Some(match Token::from_str(string.as_str()) {
+            Ok(v) => match v {
+                Token::TextType => self.get_column_type_token(Token::TextType, Token::TextArrType),
+                Token::IntType => self.get_column_type_token(Token::IntType, Token::IntArrType),
+                v => v,
+            },
+            Err(_) => Token::Identifier(string),
         })
+    }
+
+    fn get_column_type_token(&mut self, base_type: Token, arr_type: Token) -> Token {
+        if self.scanner.consume_if(|c| c == '[') {
+            if self.scanner.consume_if(|c| c == ']') {
+                arr_type
+            } else {
+                Token::Erroneous("Expected a closing ']' after '['".to_owned())
+            }
+        } else {
+            base_type
+        }
     }
 }
 
@@ -250,7 +223,6 @@ mod tests {
         assert_eq!(get_tokens("\n"), vec![]);
         assert_eq!(get_tokens("1.33"), vec![Token::Float(1.33)]);
         assert_eq!(get_tokens("\"hello\""), vec![Token::String("hello".into())]);
-        // TODO: ?
         assert_eq!(
             get_tokens("\"hello\n\""),
             vec![Token::String("hello\n".into())]
@@ -288,6 +260,22 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_number_negative_int() {
+        assert_eq!(
+            Lexer::new("20").tokenize_number('-'),
+            Some(Token::SignedInt(-20))
+        );
+    }
+
+    #[test]
+    fn test_tokenize_number_negative_float() {
+        assert_eq!(
+            Lexer::new("20.0").tokenize_number('-'),
+            Some(Token::Float(-20.0))
+        );
+    }
+
+    #[test]
     fn test_tokenize_ident() {
         assert_eq!(
             Lexer::new("20").tokenize_ident('a'),
@@ -313,18 +301,40 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_ident_with_underscore() {
+        assert_eq!(
+            Lexer::new("_snoobers").tokenize_ident('x'),
+            Some(Token::Identifier("x_snoobers".into()))
+        );
+    }
+
+    #[test]
     fn test_position() {
         let tokens = Lexer::new("hello\nhello\nhello\n\t\t9\nAND\n").tokenize();
 
-        assert_eq!(tokens[0].pos.start_inclusive.0, 0);
-        assert_eq!(tokens[0].pos.end_inclusive.0, 4);
-        assert_eq!(tokens[1].pos.start_inclusive.0, 6);
-        assert_eq!(tokens[1].pos.end_inclusive.0, 10);
-        assert_eq!(tokens[2].pos.start_inclusive.0, 12);
-        assert_eq!(tokens[2].pos.end_inclusive.0, 16);
-        assert_eq!(tokens[3].pos.start_inclusive.0, 20);
-        assert_eq!(tokens[3].pos.end_inclusive.0, 20);
-        assert_eq!(tokens[4].pos.start_inclusive.0, 22);
-        assert_eq!(tokens[4].pos.end_inclusive.0, 24);
+        let token = &tokens[0];
+        assert_eq!(token.pos.start_inclusive.0, 0);
+        assert_eq!(token.pos.end_inclusive.0, 4);
+        assert_eq!(token.pos.line, 1);
+
+        let token = &tokens[1];
+        assert_eq!(token.pos.start_inclusive.0, 6);
+        assert_eq!(token.pos.end_inclusive.0, 10);
+        assert_eq!(token.pos.line, 2);
+
+        let token = &tokens[2];
+        assert_eq!(token.pos.start_inclusive.0, 12);
+        assert_eq!(token.pos.end_inclusive.0, 16);
+        assert_eq!(token.pos.line, 3);
+
+        let token = &tokens[3];
+        assert_eq!(token.pos.start_inclusive.0, 20);
+        assert_eq!(token.pos.end_inclusive.0, 20);
+        assert_eq!(token.pos.line, 4);
+
+        let token = &tokens[4];
+        assert_eq!(token.pos.start_inclusive.0, 22);
+        assert_eq!(token.pos.end_inclusive.0, 24);
+        assert_eq!(token.pos.line, 5);
     }
 }

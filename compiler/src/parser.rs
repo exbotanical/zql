@@ -1,13 +1,14 @@
 use crate::{
-    pos::WithPosMetadata,
+    expr::{Binary, Expr, Grouping, Identifier, Literal, Logical},
+    pos::WithTokenMetadata,
     stmt::{
-        Binary, ColumnConfig, ColumnType, CreateTableStatement, Expr, Grouping, Identifier,
-        InsertStatement, Literal, Logical, SelectOpt, SelectStatement, Statement,
+        ColumnConfig, ColumnType, CreateTableStatement, InsertStatement, SelectOpt,
+        SelectStatement, Statement,
     },
     token::{Operator, Token, TokenKind},
 };
 
-static EOF_TOKEN: WithPosMetadata<Token> = WithPosMetadata::empty(Token::Eof);
+static EOF_TOKEN: WithTokenMetadata<Token> = WithTokenMetadata::empty(Token::Eof);
 
 static STATEMENT_KEYWORDS: [TokenKind; 3] =
     [TokenKind::Insert, TokenKind::Select, TokenKind::Create];
@@ -20,12 +21,12 @@ static COMPARISON_TOKENS: [TokenKind; 4] = [
 static EQUALITY_TOKENS: [TokenKind; 2] = [TokenKind::BangEqual, TokenKind::EqualEqual];
 
 pub struct Parser {
-    tokens: Vec<WithPosMetadata<Token>>,
+    tokens: Vec<WithTokenMetadata<Token>>,
     cursor: usize,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<WithPosMetadata<Token>>) -> Parser {
+    pub fn new(tokens: Vec<WithTokenMetadata<Token>>) -> Parser {
         Parser { tokens, cursor: 0 }
     }
 
@@ -46,14 +47,14 @@ impl Parser {
         }
     }
 
-    fn peek(&self) -> &WithPosMetadata<Token> {
+    fn peek(&self) -> &WithTokenMetadata<Token> {
         match self.tokens.get(self.cursor) {
             Some(t) => t,
             None => &EOF_TOKEN,
         }
     }
 
-    fn next(&mut self) -> &WithPosMetadata<Token> {
+    fn next(&mut self) -> &WithTokenMetadata<Token> {
         match self.tokens.get(self.cursor) {
             Some(t) => {
                 self.cursor = self.cursor + 1;
@@ -78,26 +79,25 @@ impl Parser {
         false
     }
 
-    fn consume(&mut self, t: TokenKind, msg: &str) -> Result<&WithPosMetadata<Token>, String> {
+    fn consume(&mut self, t: TokenKind, msg: &str) -> Result<&WithTokenMetadata<Token>, String> {
         if self.check(t) {
             Ok(self.next())
         } else {
-            Err(msg.to_string())
+            Err(msg.to_owned())
         }
     }
 
     fn parse_stmt(&mut self) -> Result<Statement, String> {
-        // TODO: lower the first kw down into stmt?
         let result = match &self.next().value {
             Token::Select => self.parse_select(),
             Token::Insert => self.parse_insert(),
             Token::Create => self.parse_create_table(),
-            _ => return Err("Expected a valid statement".to_string()),
+            _ => return Err("Expected a valid statement".to_owned()),
         };
 
         match &self.next().value {
             Token::Semicolon => result,
-            _ => Err("Expected statement to be terminated by ';'".to_string()),
+            _ => Err("Expected statement to be terminated by ';'".to_owned()),
         }
     }
 
@@ -112,7 +112,7 @@ impl Parser {
         } else {
             let mut cols = self.parse_columns()?;
             if cols.len() == 0 {
-                return Err("Expected at least 1 column in SELECT statement".to_string());
+                return Err("Expected at least 1 column in SELECT statement".to_owned());
             }
 
             columns.append(&mut cols);
@@ -122,7 +122,7 @@ impl Parser {
 
         let source = match &self.next().value {
             Token::Identifier(v) => v,
-            _ => return Err("Expected a source table name".to_string()),
+            _ => return Err("Expected a source table name".to_owned()),
         }
         .to_owned();
 
@@ -131,7 +131,7 @@ impl Parser {
                 source,
                 columns,
                 expr: Expr::None,
-                opt: SelectOpt::None,
+                opts: vec![],
             }));
         }
 
@@ -139,17 +139,17 @@ impl Parser {
 
         let expr = self.parse_expr()?;
 
-        let opt = if self.check(TokenKind::Limit) {
-            self.parse_opt()?
-        } else {
-            SelectOpt::None
-        };
+        let mut opts: Vec<SelectOpt> = Vec::new();
+
+        if self.check(TokenKind::Limit) {
+            opts.push(self.parse_opt()?);
+        }
 
         Ok(Statement::Select(SelectStatement {
             source,
             columns,
             expr,
-            opt,
+            opts,
         }))
     }
 
@@ -158,14 +158,14 @@ impl Parser {
 
         let dest = match &self.next().value {
             Token::Identifier(v) => v.to_owned(),
-            _ => return Err("Expected a destination table name".to_string()),
+            _ => return Err("Expected a destination table name".to_owned()),
         };
 
         self.consume(TokenKind::LeftParen, "Expected '(' before columns")?;
         let columns = self.parse_columns()?;
         self.consume(TokenKind::RightParen, "Expected ')' after columns")?;
         if columns.len() == 0 {
-            return Err("Expected at least one column".to_string());
+            return Err("Expected at least one column".to_owned());
         }
 
         self.consume(TokenKind::Values, "Expected 'VALUES' keyword")?;
@@ -179,7 +179,7 @@ impl Parser {
                 columns.len(),
                 values.len()
             )
-            .to_string());
+            .to_owned());
         }
 
         Ok(Statement::Insert(InsertStatement {
@@ -189,33 +189,40 @@ impl Parser {
         }))
     }
 
-    fn parse_create_table(&mut self) -> Result<Statement, String> {
-        self.consume(TokenKind::Table, "Expected 'TABLE' keyword")?;
-
-        let name = match &self.next().value {
-            Token::Identifier(v) => v.to_owned(),
-            _ => return Err("Expected a valid table name".to_string()),
-        };
-
-        self.consume(TokenKind::LeftParen, "Expected '(' before columns")?;
-
-        let mut columns: Vec<ColumnConfig> = Vec::new();
-
-        // TODO: Generalize
+    fn do_while_comma<F>(&mut self, mut f: F) -> Result<(), String>
+    where
+        F: FnMut(&mut Self) -> Result<(), String>,
+    {
         loop {
-            match &self.peek().value {
-                Token::Identifier(_) => {
-                    columns.push(self.parse_column_config()?);
-                }
-                _ => return Err("Expected a valid column name".to_string()),
-            }
-
+            f(self)?;
             if !self.check(TokenKind::Comma) {
                 break;
             } else {
                 self.next();
             }
         }
+        Ok(())
+    }
+
+    fn parse_create_table(&mut self) -> Result<Statement, String> {
+        self.consume(TokenKind::Table, "Expected 'TABLE' keyword")?;
+
+        let name = match &self.next().value {
+            Token::Identifier(v) => v.to_owned(),
+            _ => return Err("Expected a valid table name".to_owned()),
+        };
+
+        self.consume(TokenKind::LeftParen, "Expected '(' before columns")?;
+
+        let mut columns: Vec<ColumnConfig> = Vec::new();
+
+        self.do_while_comma(|this| match &this.peek().value {
+            Token::Identifier(_) => {
+                columns.push(this.parse_column_config()?);
+                Ok(())
+            }
+            _ => return Err("Expected a valid column name".to_owned()),
+        })?;
 
         self.consume(TokenKind::RightParen, "Expected ')' after columns")?;
 
@@ -228,20 +235,13 @@ impl Parser {
     fn parse_columns(&mut self) -> Result<Vec<String>, String> {
         let mut columns: Vec<String> = Vec::new();
 
-        loop {
-            match &self.next().value {
-                Token::Identifier(v) => {
-                    columns.push(v.to_owned());
-                }
-                _ => return Err("Expected a valid column name".to_string()),
+        self.do_while_comma(|this| match &this.next().value {
+            Token::Identifier(v) => {
+                columns.push(v.to_owned());
+                Ok(())
             }
-
-            if !self.check(TokenKind::Comma) {
-                break;
-            } else {
-                self.next();
-            }
-        }
+            _ => return Err("Expected a valid column name".to_owned()),
+        })?;
 
         Ok(columns)
     }
@@ -249,16 +249,12 @@ impl Parser {
     fn parse_column_config(&mut self) -> Result<ColumnConfig, String> {
         let name = match &self.next().value {
             Token::Identifier(v) => v.to_owned(),
-            _ => return Err("Expected a valid column name".to_string()),
+            _ => return Err("Expected a valid column name".to_owned()),
         };
 
-        let t = match &self.next().value {
-            // TODO: try_from?
-            Token::Int => ColumnType::Int,
-            Token::Text => ColumnType::Text,
-            // TODO: get token value somehow?
-            _ => return Err("Expected a valid column type".to_string()),
-        };
+        let t: ColumnType = (&self.next().value)
+            .try_into()
+            .map_err(|_| "Expected a valid column type")?;
 
         Ok(ColumnConfig { name, t })
     }
@@ -267,44 +263,26 @@ impl Parser {
         match &self.next().value {
             Token::Limit => match &self.next().value {
                 Token::UnsignedInt(v) => Ok(SelectOpt::Limit(*v)),
-                _ => Err("Expected an unsigned integer".to_string()),
+                _ => Err("Expected an unsigned integer".to_owned()),
             },
-            _ => Err("Expected a valid opt type".to_string()),
+            _ => Err("Expected a valid opt type".to_owned()),
         }
     }
 
     fn parse_literals(&mut self) -> Result<Vec<Literal>, String> {
         let mut literals: Vec<Literal> = Vec::new();
 
-        loop {
-            literals.push(self.parse_literal()?);
-
-            if !self.check(TokenKind::Comma) {
-                break;
-            } else {
-                self.next();
-            }
-        }
+        self.do_while_comma(|this| {
+            literals.push((&this.next().value).try_into()?);
+            Ok(())
+        })?;
 
         Ok(literals)
     }
 
-    fn parse_literal(&mut self) -> Result<Literal, String> {
-        match &self.next().value {
-            // TODO: try_into?
-            Token::False => Ok(Literal::Boolean(false)),
-            Token::True => Ok(Literal::Boolean(true)),
-            Token::Nil => Ok(Literal::Nil),
-            Token::UnsignedInt(v) => Ok(Literal::UnsignedInt(*v)),
-            Token::Float(v) => Ok(Literal::Float(*v)),
-            Token::String(v) => Ok(Literal::String(v.to_owned())),
-            _ => Err("Expected a valid literal".to_string()),
-        }
-    }
-
     fn parse_expr(&mut self) -> Result<Expr, String> {
         match self.parse_or()? {
-            Expr::Literal(_) | Expr::Identifier(_) => Err("Expected an expression".to_string()),
+            Expr::Literal(_) | Expr::Identifier(_) => Err("Expected an expression".to_owned()),
             expr => Ok(expr),
         }
     }
@@ -347,12 +325,13 @@ impl Parser {
         let mut expr = if is_left {
             self.parse_left_primary()
         } else {
-            self.parse_right_primary()
+            self.parse_right_primary(false)
         }?;
 
         while self.matches_any(&COMPARISON_TOKENS) {
             let token = self.next().value.clone();
-            let right = self.parse_right_primary()?;
+            let right = self.parse_right_primary(true)?;
+
             expr = Expr::Binary(Binary {
                 left: Box::new(expr),
                 operator: token.try_into()?,
@@ -397,24 +376,26 @@ impl Parser {
             }
             _ => Err(
                 "Expected either an identifier or nested expression for left side of expression"
-                    .to_string(),
+                    .to_owned(),
             ),
         }
     }
 
-    fn parse_right_primary(&mut self) -> Result<Expr, String> {
-        match &self.next().value {
-            // TODO: try_into?
-            // TODO: dedupe parse_literal
-            Token::False => Ok(Expr::Literal(Literal::Boolean(false))),
-            Token::True => Ok(Expr::Literal(Literal::Boolean(true))),
-            Token::Nil => Ok(Expr::Literal(Literal::Nil)),
-            Token::UnsignedInt(v) => Ok(Expr::Literal(Literal::UnsignedInt(*v))),
-            Token::Float(v) => Ok(Expr::Literal(Literal::Float(*v))),
-            Token::String(v) => Ok(Expr::Literal(Literal::String(v.to_owned()))),
-            Token::Identifier(v) => Ok(Expr::Identifier(Identifier {
+    fn parse_right_primary(&mut self, is_compare: bool) -> Result<Expr, String> {
+        let token = &self.next().value;
+        if is_compare {
+            match token {
+                Token::True | Token::False | Token::Nil => {
+                    return Err("Invalid type for comparison expression".to_owned())
+                }
+                _ => {}
+            }
+        }
+
+        Ok(match token {
+            Token::Identifier(v) => Expr::Identifier(Identifier {
                 value: v.to_owned(),
-            })),
+            }),
             Token::LeftParen => {
                 let expr = self.parse_expr()?;
                 self.consume(
@@ -422,12 +403,12 @@ impl Parser {
                     "Expected ')' after nested expression",
                 )?;
 
-                Ok(Expr::Grouping(Grouping {
+                Expr::Grouping(Grouping {
                     expr: Box::new(expr),
-                }))
+                })
             }
-            _ => Err("Expected either a primitive, identifier, or nested expression for right side of expression".to_string()),
-        }
+            v =>  Expr::Literal(v.try_into().map_err(|_|"Expected either a primitive, identifier, or nested expression for right side of expression".to_owned())?)
+        })
     }
 }
 
@@ -436,10 +417,11 @@ mod tests {
     use lazy_static::lazy_static;
 
     use crate::{
+        expr::{Binary, Expr, Grouping, Identifier, Literal, Logical},
         lexer::Lexer,
         stmt::{
-            Binary, ColumnConfig, ColumnType, CreateTableStatement, Expr, Grouping, Identifier,
-            InsertStatement, Literal, Logical, SelectOpt, SelectStatement, Statement,
+            ColumnConfig, ColumnType, CreateTableStatement, InsertStatement, SelectOpt,
+            SelectStatement, Statement,
         },
         token::{Operator, Token, TokenKind},
     };
@@ -449,28 +431,28 @@ mod tests {
     lazy_static! {
         #[derive(Debug)]
         static ref SELECT_STMT: Statement = Statement::Select(SelectStatement {
-            source: "blog_post".to_string(),
+            source: "blog_post".to_owned(),
             columns: vec!["uuid", "title", "subtitle", "img_src", "slug", "tags", "body",]
                 .into_iter()
-                .map(|s| s.to_string())
+                .map(|s| s.to_owned())
                 .collect(),
             expr: Expr::Binary(Binary{
-              left: Box::new(Expr::Identifier(Identifier{value:"slug".to_string()})),
+              left: Box::new(Expr::Identifier(Identifier{value:"slug".to_owned()})),
               operator: Operator::EqualEqual,
-              right: Box::new(Expr::Literal(Literal::String("hello".to_string())))
+              right: Box::new(Expr::Literal(Literal::String("hello".to_owned())))
             }),
-            opt: SelectOpt::Limit(1),
+            opts:vec![ SelectOpt::Limit(1)],
         });
 
         static ref INSERT_STMT: Statement = Statement::Insert(InsertStatement {
                 columns: vec!["title", "subtitle", "img_src", "slug", "tags", "body"]
                     .into_iter()
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_owned())
                     .collect(),
-                dest: "blog_post".to_string(),
+                dest: "blog_post".to_owned(),
                 values: vec![
-                    Literal::String("a".to_string()),
-                    Literal::String("b".to_string()),
+                    Literal::String("a".to_owned()),
+                    Literal::String("b".to_owned()),
                     Literal::Nil,
                     Literal::UnsignedInt(1),
                     Literal::Float(2.0),
@@ -479,22 +461,22 @@ mod tests {
             });
 
             static ref CREATE_TABLE_STMT: Statement = Statement::CreateTable(CreateTableStatement {
-                name: "blog_post_comment".to_string(),
+                name: "blog_post_comment".to_owned(),
                 columns: vec![
                     ColumnConfig {
-                        name: "uuid".to_string(),
+                        name: "uuid".to_owned(),
                         t: ColumnType::Text
                     },
                     ColumnConfig {
-                        name: "created_at".to_string(),
+                        name: "created_at".to_owned(),
                         t: ColumnType::Int
                     },
                     ColumnConfig {
-                        name: "comment".to_string(),
+                        name: "comment".to_owned(),
                         t: ColumnType::Text
                     },
                     ColumnConfig {
-                        name: "email".to_string(),
+                        name: "email".to_owned(),
                         t: ColumnType::Text
                     }
                 ]
@@ -514,11 +496,11 @@ mod tests {
 
         assert_eq!(p.peek().value, Token::Select);
         p.next();
-        assert_eq!(p.peek().value, Token::Identifier("hello".to_string()));
+        assert_eq!(p.peek().value, Token::Identifier("hello".to_owned()));
         p.next();
         assert_eq!(p.peek().value, Token::From);
         p.next();
-        assert_eq!(p.peek().value, Token::Identifier("world".to_string()));
+        assert_eq!(p.peek().value, Token::Identifier("world".to_owned()));
         p.next();
         assert_eq!(p.peek().value, Token::Semicolon);
         p.next();
@@ -543,9 +525,9 @@ mod tests {
         let mut p = get_parser("SELECT hello FROM world;");
 
         assert_eq!(p.next().value, Token::Select);
-        assert_eq!(p.next().value, Token::Identifier("hello".to_string()));
+        assert_eq!(p.next().value, Token::Identifier("hello".to_owned()));
         assert_eq!(p.next().value, Token::From);
-        assert_eq!(p.next().value, Token::Identifier("world".to_string()));
+        assert_eq!(p.next().value, Token::Identifier("world".to_owned()));
         assert_eq!(p.next().value, Token::Semicolon);
         assert_eq!(p.next().value, Token::Eof);
         assert_eq!(p.next().value, Token::Eof);
@@ -633,7 +615,7 @@ mod tests {
             p.consume(TokenKind::Identifier, "")
                 .expect("expected valid token")
                 .value,
-            Token::Identifier("hello".to_string())
+            Token::Identifier("hello".to_owned())
         );
 
         assert_eq!(
@@ -647,7 +629,7 @@ mod tests {
             p.consume(TokenKind::Identifier, "")
                 .expect("expected valid token")
                 .value,
-            Token::Identifier("world".to_string())
+            Token::Identifier("world".to_owned())
         );
 
         assert_eq!(
@@ -771,10 +753,7 @@ mod tests {
         .parse_stmt()
         .unwrap_err();
 
-        assert_eq!(
-            err,
-            "Expected statement to be terminated by ';'".to_string()
-        )
+        assert_eq!(err, "Expected statement to be terminated by ';'".to_owned())
     }
 
     #[test]
@@ -787,7 +766,7 @@ mod tests {
         .parse_stmt()
         .unwrap_err();
 
-        assert_eq!(err, "Expected a valid statement".to_string())
+        assert_eq!(err, "Expected a valid statement".to_owned())
     }
 
     #[test]
@@ -817,19 +796,19 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::Select(SelectStatement {
-                source: "blog_post".to_string(),
+                source: "blog_post".to_owned(),
                 columns: vec!["uuid", "title", "subtitle", "img_src", "slug", "tags", "body",]
                     .into_iter()
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_owned())
                     .collect(),
                 expr: Expr::Binary(Binary {
                     left: Box::new(Expr::Identifier(Identifier {
-                        value: "slug".to_string()
+                        value: "slug".to_owned()
                     })),
                     operator: Operator::EqualEqual,
-                    right: Box::new(Expr::Literal(Literal::String("hello".to_string())))
+                    right: Box::new(Expr::Literal(Literal::String("hello".to_owned())))
                 }),
-                opt: SelectOpt::None
+                opts: vec![]
             })
         )
     }
@@ -847,13 +826,13 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::Select(SelectStatement {
-                source: "blog_post".to_string(),
+                source: "blog_post".to_owned(),
                 columns: vec!["uuid", "title", "subtitle", "img_src", "slug", "tags", "body",]
                     .into_iter()
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_owned())
                     .collect(),
                 expr: Expr::None,
-                opt: SelectOpt::None
+                opts: vec![]
             })
         )
     }
@@ -867,7 +846,7 @@ mod tests {
         .parse_select()
         .unwrap_err();
 
-        assert_eq!(err, "Expected a valid column name".to_string())
+        assert_eq!(err, "Expected a valid column name".to_owned())
     }
 
     #[test]
@@ -880,7 +859,7 @@ mod tests {
         .parse_select()
         .unwrap_err();
 
-        assert_eq!(err, "Expected 'FROM' keyword after columns".to_string())
+        assert_eq!(err, "Expected 'FROM' keyword after columns".to_owned())
     }
 
     #[test]
@@ -898,12 +877,12 @@ mod tests {
             Statement::Insert(InsertStatement {
                 columns: vec!["title", "subtitle", "img_src", "slug", "tags", "body"]
                     .into_iter()
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_owned())
                     .collect(),
-                dest: "blog_post".to_string(),
+                dest: "blog_post".to_owned(),
                 values: vec![
-                    Literal::String("a".to_string()),
-                    Literal::String("b".to_string()),
+                    Literal::String("a".to_owned()),
+                    Literal::String("b".to_owned()),
                     Literal::Nil,
                     Literal::UnsignedInt(1),
                     Literal::Float(2.0),
@@ -1056,13 +1035,52 @@ mod tests {
                 comment TEXT      ,
                 // comment
                 email TEXT
-                // TODO: words TEXT[]
             );",
         )
         .parse_create_table()
         .expect("expected valid CREATE statement");
 
         assert_eq!(stmt, *CREATE_TABLE_STMT)
+    }
+
+    #[test]
+    fn test_parse_create_table_ok_arr_types() {
+        let stmt = get_parser(
+            "
+            TABLE blog_post_comment(
+                uuid TEXT,
+                comments TEXT[],
+                created_at INT,
+                dates INT[]
+            );",
+        )
+        .parse_create_table()
+        .expect("expected valid CREATE statement");
+
+        assert_eq!(
+            stmt,
+            Statement::CreateTable(CreateTableStatement {
+                name: "blog_post_comment".to_owned(),
+                columns: vec![
+                    ColumnConfig {
+                        name: "uuid".to_owned(),
+                        t: ColumnType::Text
+                    },
+                    ColumnConfig {
+                        name: "comments".to_owned(),
+                        t: ColumnType::TextArr
+                    },
+                    ColumnConfig {
+                        name: "created_at".to_owned(),
+                        t: ColumnType::Int
+                    },
+                    ColumnConfig {
+                        name: "dates".to_owned(),
+                        t: ColumnType::IntArr
+                    }
+                ]
+            })
+        )
     }
 
     #[test]
@@ -1080,7 +1098,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected 'TABLE' keyword".to_string());
+        assert_eq!(err, "Expected 'TABLE' keyword".to_owned());
     }
 
     #[test]
@@ -1098,7 +1116,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected a valid table name".to_string());
+        assert_eq!(err, "Expected a valid table name".to_owned());
     }
 
     #[test]
@@ -1116,7 +1134,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected '(' before columns".to_string());
+        assert_eq!(err, "Expected '(' before columns".to_owned());
     }
 
     #[test]
@@ -1128,7 +1146,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected '(' before columns".to_string());
+        assert_eq!(err, "Expected '(' before columns".to_owned());
     }
 
     #[test]
@@ -1142,7 +1160,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected a valid column name".to_string());
+        assert_eq!(err, "Expected a valid column name".to_owned());
     }
 
     #[test]
@@ -1156,7 +1174,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected a valid column name".to_string());
+        assert_eq!(err, "Expected a valid column name".to_owned());
     }
 
     #[test]
@@ -1170,7 +1188,7 @@ mod tests {
         .parse_create_table()
         .unwrap_err();
 
-        assert_eq!(err, "Expected ')' after columns".to_string());
+        assert_eq!(err, "Expected ')' after columns".to_owned());
     }
 
     #[test]
@@ -1198,7 +1216,7 @@ mod tests {
     #[test]
     fn test_parse_columns_err_empty() {
         let err = get_parser("").parse_columns().unwrap_err();
-        assert_eq!(err, "Expected a valid column name".to_string());
+        assert_eq!(err, "Expected a valid column name".to_owned());
     }
 
     #[test]
@@ -1216,7 +1234,7 @@ mod tests {
         assert_eq!(
             col_conf,
             ColumnConfig {
-                name: "my_col".to_string(),
+                name: "my_col".to_owned(),
                 t: ColumnType::Text
             }
         );
@@ -1228,14 +1246,14 @@ mod tests {
             .parse_column_config()
             .unwrap_err();
 
-        assert_eq!(err, "Expected a valid column type".to_string());
+        assert_eq!(err, "Expected a valid column type".to_owned());
     }
 
     #[test]
     fn test_parse_column_config_err_kw_used_as_colname() {
         let err = get_parser("false TEXT").parse_column_config().unwrap_err();
 
-        assert_eq!(err, "Expected a valid column name".to_string());
+        assert_eq!(err, "Expected a valid column name".to_owned());
     }
 
     #[test]
@@ -1249,19 +1267,19 @@ mod tests {
     #[test]
     fn test_parse_opt_err_invalid_value_type() {
         let err = get_parser("LIMIT 5.0").parse_opt().unwrap_err();
-        assert_eq!(err, "Expected an unsigned integer".to_string());
+        assert_eq!(err, "Expected an unsigned integer".to_owned());
     }
 
     #[test]
     fn test_parse_opt_err_no_value_type() {
         let err = get_parser("LIMIT ").parse_opt().unwrap_err();
-        assert_eq!(err, "Expected an unsigned integer".to_string());
+        assert_eq!(err, "Expected an unsigned integer".to_owned());
     }
 
     #[test]
     fn test_parse_opt_err_non_opt() {
         let err = get_parser("SELECT 5").parse_opt().unwrap_err();
-        assert_eq!(err, "Expected a valid opt type".to_string());
+        assert_eq!(err, "Expected a valid opt type".to_owned());
     }
 
     #[test]
@@ -1274,10 +1292,10 @@ mod tests {
             expr,
             Expr::Binary(Binary {
                 left: Box::new(Expr::Identifier(Identifier {
-                    value: "hello".to_string()
+                    value: "hello".to_owned()
                 })),
                 operator: Operator::EqualEqual,
-                right: Box::new(Expr::Literal(Literal::String("world".to_string())))
+                right: Box::new(Expr::Literal(Literal::String("world".to_owned())))
             })
         );
         let expr = get_parser("hello != true")
@@ -1288,7 +1306,7 @@ mod tests {
             expr,
             Expr::Binary(Binary {
                 left: Box::new(Expr::Identifier(Identifier {
-                    value: "hello".to_string()
+                    value: "hello".to_owned()
                 })),
                 operator: Operator::BangEqual,
                 right: Box::new(Expr::Literal(Literal::Boolean(true)))
@@ -1303,14 +1321,13 @@ mod tests {
             expr,
             Expr::Binary(Binary {
                 left: Box::new(Expr::Identifier(Identifier {
-                    value: "hello".to_string()
+                    value: "hello".to_owned()
                 })),
                 operator: Operator::Greater,
                 right: Box::new(Expr::Literal(Literal::UnsignedInt(9)))
             })
         );
 
-        // TODO: disallow comp on bools and null
         let expr = get_parser("hello >= \"world\"")
             .parse_expr()
             .expect("expected valid expression");
@@ -1319,10 +1336,10 @@ mod tests {
             expr,
             Expr::Binary(Binary {
                 left: Box::new(Expr::Identifier(Identifier {
-                    value: "hello".to_string()
+                    value: "hello".to_owned()
                 })),
                 operator: Operator::GreaterEqual,
-                right: Box::new(Expr::Literal(Literal::String("world".to_string())))
+                right: Box::new(Expr::Literal(Literal::String("world".to_owned())))
             })
         );
 
@@ -1334,7 +1351,7 @@ mod tests {
             expr,
             Expr::Binary(Binary {
                 left: Box::new(Expr::Identifier(Identifier {
-                    value: "hello".to_string()
+                    value: "hello".to_owned()
                 })),
                 operator: Operator::Less,
                 right: Box::new(Expr::Literal(Literal::Float(100.21)))
@@ -1349,17 +1366,17 @@ mod tests {
             expr,
             Expr::Binary(Binary {
                 left: Box::new(Expr::Identifier(Identifier {
-                    value: "hello".to_string()
+                    value: "hello".to_owned()
                 })),
                 operator: Operator::LessEqual,
-                right: Box::new(Expr::Literal(Literal::String("world".to_string())))
+                right: Box::new(Expr::Literal(Literal::String("world".to_owned())))
             })
         );
     }
 
     #[test]
     fn test_parse_expr_ok_compound() {
-        let expr = get_parser("hello == \"world\" AND won == 3 OR won != 22")
+        let expr = get_parser("hello == \"world\" AND won == nil OR won != 22")
             .parse_expr()
             .expect("expected valid expressions");
 
@@ -1369,24 +1386,24 @@ mod tests {
                 left: Box::new(Expr::Logical(Logical {
                     left: Box::new(Expr::Binary(Binary {
                         left: Box::new(Expr::Identifier(Identifier {
-                            value: "hello".to_string(),
+                            value: "hello".to_owned(),
                         })),
                         operator: Operator::EqualEqual,
-                        right: Box::new(Expr::Literal(Literal::String("world".to_string()))),
+                        right: Box::new(Expr::Literal(Literal::String("world".to_owned()))),
                     })),
                     operator: Operator::And,
                     right: Box::new(Expr::Binary(Binary {
                         left: Box::new(Expr::Identifier(Identifier {
-                            value: "won".to_string(),
+                            value: "won".to_owned(),
                         })),
                         operator: Operator::EqualEqual,
-                        right: Box::new(Expr::Literal(Literal::UnsignedInt(3))),
+                        right: Box::new(Expr::Literal(Literal::Nil)),
                     })),
                 })),
                 operator: Operator::Or,
                 right: Box::new(Expr::Binary(Binary {
                     left: Box::new(Expr::Identifier(Identifier {
-                        value: "won".to_string(),
+                        value: "won".to_owned(),
                     })),
                     operator: Operator::BangEqual,
                     right: Box::new(Expr::Literal(Literal::UnsignedInt(22))),
@@ -1397,7 +1414,7 @@ mod tests {
 
     #[test]
     fn test_parse_expr_ok_left_compound() {
-        let expr = get_parser("(hello == \"world\" AND won == 3) OR won != 22")
+        let expr = get_parser("(hello == \"world\" AND won == true) OR won != 22")
             .parse_expr()
             .expect("expected valid expressions");
 
@@ -1408,25 +1425,25 @@ mod tests {
                     expr: Box::new(Expr::Logical(Logical {
                         left: Box::new(Expr::Binary(Binary {
                             left: Box::new(Expr::Identifier(Identifier {
-                                value: "hello".to_string(),
+                                value: "hello".to_owned(),
                             })),
                             operator: Operator::EqualEqual,
-                            right: Box::new(Expr::Literal(Literal::String("world".to_string()))),
+                            right: Box::new(Expr::Literal(Literal::String("world".to_owned()))),
                         })),
                         operator: Operator::And,
                         right: Box::new(Expr::Binary(Binary {
                             left: Box::new(Expr::Identifier(Identifier {
-                                value: "won".to_string(),
+                                value: "won".to_owned(),
                             })),
                             operator: Operator::EqualEqual,
-                            right: Box::new(Expr::Literal(Literal::UnsignedInt(3))),
+                            right: Box::new(Expr::Literal(Literal::Boolean(true))),
                         })),
                     })),
                 })),
                 operator: Operator::Or,
                 right: Box::new(Expr::Binary(Binary {
                     left: Box::new(Expr::Identifier(Identifier {
-                        value: "won".to_string(),
+                        value: "won".to_owned(),
                     })),
                     operator: Operator::BangEqual,
                     right: Box::new(Expr::Literal(Literal::UnsignedInt(22))),
@@ -1446,17 +1463,17 @@ mod tests {
             Expr::Logical(Logical {
                 left: Box::new(Expr::Binary(Binary {
                     left: Box::new(Expr::Identifier(Identifier {
-                        value: String::from("hello")
+                        value: "hello".to_owned()
                     })),
                     operator: Operator::EqualEqual,
-                    right: Box::new(Expr::Literal(Literal::String(String::from("world"))))
+                    right: Box::new(Expr::Literal(Literal::String("world".to_owned())))
                 })),
                 operator: Operator::And,
                 right: Box::new(Expr::Grouping(Grouping {
                     expr: Box::new(Expr::Logical(Logical {
                         left: Box::new(Expr::Binary(Binary {
                             left: Box::new(Expr::Identifier(Identifier {
-                                value: String::from("won")
+                                value: "won".to_owned()
                             })),
                             operator: Operator::EqualEqual,
                             right: Box::new(Expr::Literal(Literal::UnsignedInt(3)))
@@ -1464,7 +1481,7 @@ mod tests {
                         operator: Operator::Or,
                         right: Box::new(Expr::Binary(Binary {
                             left: Box::new(Expr::Identifier(Identifier {
-                                value: String::from("won")
+                                value: "won".to_owned()
                             })),
                             operator: Operator::BangEqual,
                             right: Box::new(Expr::Literal(Literal::UnsignedInt(22)))
@@ -1529,51 +1546,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_literal_ok() {
-        assert_eq!(
-            get_parser("\"text\"")
-                .parse_literal()
-                .expect("expected valid literal"),
-            Literal::String("text".to_string())
-        );
-
-        assert_eq!(
-            get_parser("100")
-                .parse_literal()
-                .expect("expected valid literal"),
-            Literal::UnsignedInt(100)
-        );
-
-        assert_eq!(
-            get_parser("100.100")
-                .parse_literal()
-                .expect("expected valid literal"),
-            Literal::Float(100.100)
-        );
-
-        assert_eq!(
-            get_parser("true")
-                .parse_literal()
-                .expect("expected valid literal"),
-            Literal::Boolean(true)
-        );
-
-        assert_eq!(
-            get_parser("false")
-                .parse_literal()
-                .expect("expected valid literal"),
-            Literal::Boolean(false)
-        );
-
-        assert_eq!(
-            get_parser("nil")
-                .parse_literal()
-                .expect("expected valid literal"),
-            Literal::Nil
-        );
+    fn test_parse_expr_err_compare_bool() {
+        let err = get_parser("field <= true").parse_expr().unwrap_err();
+        assert_eq!(err, "Invalid type for comparison expression");
+        let err = get_parser("field <= false").parse_expr().unwrap_err();
+        assert_eq!(err, "Invalid type for comparison expression");
     }
 
-    // TODO: code cov tool
+    #[test]
+    fn test_parse_expr_err_compare_nil() {
+        let err = get_parser("field > nil").parse_expr().unwrap_err();
+        assert_eq!(err, "Invalid type for comparison expression");
+    }
+
     #[test]
     fn test_parse_literals_ok() {
         let lits = get_parser("true, false, nil, 1, \"hi\"")
@@ -1600,21 +1585,5 @@ mod tests {
     fn test_parse_literals_err_empty() {
         let err = get_parser("").parse_literals().unwrap_err();
         assert_eq!(err, "Expected a valid literal");
-    }
-
-    #[test]
-    fn test_parse_literal_err_not_literal() {
-        assert_eq!(
-            get_parser("nile").parse_literal().unwrap_err(),
-            "Expected a valid literal"
-        );
-    }
-
-    #[test]
-    fn test_parse_literal_err_empty() {
-        assert_eq!(
-            get_parser("").parse_literal().unwrap_err(),
-            "Expected a valid literal"
-        );
     }
 }
