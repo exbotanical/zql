@@ -1,4 +1,5 @@
 use crate::{
+    error::CompilerError,
     expr::{Binary, Expr, Grouping, Identifier, Literal, Logical},
     pos::WithTokenMetadata,
     stmt::{
@@ -30,20 +31,28 @@ impl Parser {
         Parser { tokens, cursor: 0 }
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Statement>, String> {
+    pub fn parse(&mut self) -> Result<Vec<Statement>, CompilerError> {
         let mut statements: Vec<Statement> = Vec::new();
 
         while self.matches_any(&STATEMENT_KEYWORDS) {
             statements.push(self.parse_stmt()?);
         }
 
+        if statements.len() == 0 {
+            return Err(CompilerError::ParseError(
+                "Expected a valid statement but didn't get one".into(),
+            ));
+        }
+
         let next = self.next();
+
         match next.value {
             Token::Eof => Ok(statements),
             _ => Err(format!(
                 "Expected a new statement to begin after `;` at Ln {}",
                 next.pos.line,
-            )),
+            )
+            .into()),
         }
     }
 
@@ -93,10 +102,10 @@ impl Parser {
             Token::Insert => self.parse_insert(),
             Token::Create => self.parse_create_table(),
             _ => return Err("Expected a valid statement".to_owned()),
-        };
+        }?;
 
         match &self.next().value {
-            Token::Semicolon => result,
+            Token::Semicolon => Ok(result),
             _ => Err("Expected statement to be terminated by ';'".to_owned()),
         }
     }
@@ -417,6 +426,7 @@ mod tests {
     use lazy_static::lazy_static;
 
     use crate::{
+        error::CompilerError,
         expr::{Binary, Expr, Grouping, Identifier, Literal, Logical},
         lexer::Lexer,
         stmt::{
@@ -727,7 +737,12 @@ mod tests {
         .parse()
         .unwrap_err();
 
-        assert_eq!(err, "Expected a new statement to begin after `;` at Ln 20");
+        assert_eq!(
+            err,
+            CompilerError::ParseError(
+                "Expected a new statement to begin after `;` at Ln 20".into()
+            )
+        );
     }
 
     #[test]

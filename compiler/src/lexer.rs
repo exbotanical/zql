@@ -231,6 +231,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    // TODO: return error (don't panic)
     fn test_lexer_unknown_char() {
         assert_eq!(get_tokens("|"), vec![]);
     }
