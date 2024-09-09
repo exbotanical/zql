@@ -12,6 +12,7 @@ mod scanner;
 mod stmt;
 mod token;
 
+// TODO: prune parser and lexer to scope down to current grammar
 pub fn parse(buf: &str) -> Result<Vec<Statement>, CompilerError> {
     Parser::new(Lexer::new(buf).tokenize()).parse()
 }
